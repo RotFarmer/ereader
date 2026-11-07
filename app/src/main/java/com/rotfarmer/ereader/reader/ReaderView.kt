@@ -334,7 +334,9 @@ class ReaderView(ctx: Context) : View(ctx) {
         canvas.save()
         if (zoomed) canvas.concat(zoomMatrix)
         if (hw) {
-            if (contentDirty) {
+            // Android discards our layers' contents when the app goes to the background,
+            // so re-record whenever they're gone, not only when the page changed.
+            if (contentDirty || !contentNode.hasDisplayList()) {
                 // Note: not inside apply{} — RenderNode has its own width/height that would shadow the view's.
                 contentNode.setPosition(0, 0, width, height)
                 val c = contentNode.beginRecording(width, height)
@@ -354,7 +356,7 @@ class ReaderView(ctx: Context) : View(ctx) {
         if (zoomed) drawHiRes(canvas, page)
 
         ghostNode?.let {
-            if (hw) {
+            if (hw && it.hasDisplayList()) {
                 it.alpha = 0.07f
                 canvas.drawRenderNode(it)
             }
@@ -364,7 +366,7 @@ class ReaderView(ctx: Context) : View(ctx) {
         canvas.save()
         if (zoomed) canvas.concat(zoomMatrix)
         if (hw) {
-            if (inkDirty) {
+            if (inkDirty || !inkNode.hasDisplayList()) {
                 inkNode.setPosition(0, 0, width, height)
                 val c = inkNode.beginRecording(width, height)
                 drawInk(c, page)
