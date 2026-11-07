@@ -319,6 +319,7 @@ class ReaderActivity : Activity(), ReaderView.Listener, PenToolbar.Callbacks {
         view.flashEvery = settings.flashEvery
         view.ghosting = settings.ghosting
         view.fingerDraw = settings.fingerDraw
+        view.tapTurns = settings.tapTurns
         view.smartHighlight = settings.smartHighlight
         view.renderer.eink = settings.einkImages
         view.inkPainter.sensitivity = settings.pressure
@@ -1348,6 +1349,9 @@ class ReaderActivity : Activity(), ReaderView.Listener, PenToolbar.Callbacks {
         c.addView(toggleRow(this, "Draw with finger", "For devices without a stylus. Two-finger swipe turns pages.", settings.fingerDraw, ui) {
             settings.fingerDraw = it; applyAppearance()
         })
+        c.addView(toggleRow(this, "Tap to turn pages", "Off: swipe to turn pages; a tap opens the menu", settings.tapTurns, ui) {
+            settings.tapTurns = it; applyAppearance()
+        })
         c.addView(toggleRow(this, "Volume keys turn pages", null, settings.volumeKeys, ui) { settings.volumeKeys = it })
         c.addView(toggleRow(this, "Highlighter snaps to text", null, settings.smartHighlight, ui) {
             settings.smartHighlight = it; applyAppearance()
@@ -1397,9 +1401,9 @@ class ReaderActivity : Activity(), ReaderView.Listener, PenToolbar.Callbacks {
         val c = card(this, ui, 20)
         c.addView(label(this, "How to read", ui, 20f, bold = true, serif = true).apply { setPadding(0, 0, 0, dp(10)) })
         val lines = listOf(
-            "Tap the right side or swipe left" to "next page",
-            "Tap the left side or swipe right" to "previous page",
-            "Tap the top of the page" to "menu",
+            "Swipe left" to "next page",
+            "Swipe right" to "previous page",
+            "Tap the page" to "menu (tap-to-turn can be switched on in Pen & touch settings)",
             "Tap the top-right corner" to "bookmark",
             "Long-press text with your finger" to "highlight, excerpt, copy",
             "S Pen" to "write, draw and highlight — it never turns pages",

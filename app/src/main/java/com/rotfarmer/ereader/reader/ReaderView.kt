@@ -130,6 +130,8 @@ class ReaderView(ctx: Context) : View(ctx) {
     var fingerDraw = false
     var smartHighlight = true
     var rtl = false
+    /** When false, taps only open the menu; pages turn by swiping. */
+    var tapTurns = false
 
     var tool = Tools.PEN
     var toolColor = 0xFF1A1A1A.toInt()
@@ -1252,7 +1254,7 @@ class ReaderView(ctx: Context) : View(ctx) {
                 }
             }
         }
-        if (y < height * 0.14f) {
+        if (!tapTurns || y < height * 0.14f) {
             listener?.onToggleChrome(); return
         }
         // The back zone is the first third of the visible page (so the pen toolbar can't cover it),

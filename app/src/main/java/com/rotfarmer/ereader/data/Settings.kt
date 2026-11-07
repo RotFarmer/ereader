@@ -34,6 +34,8 @@ class Settings(ctx: Context) {
     var fingerDraw by bool("fingerDraw", false)
     var smartHighlight by bool("smartHighlight", true)
     var volumeKeys by bool("volumeKeys", true)
+    /** Off: a tap shows/hides the menu and only swipes turn pages. */
+    var tapTurns by bool("tapTurns", false)
     var pressure by float("pressure", 0.75f)
 
     // Pen toolbar

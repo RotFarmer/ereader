@@ -21,9 +21,9 @@ The library checks for a newer build every few hours and shows a banner when one
 
 | Gesture | Action |
 | --- | --- |
-| Tap the right two-thirds / swipe left | Next page |
-| Tap the left third (next to the pen toolbar) / swipe right | Previous page |
-| Tap top of the page | Menu |
+| Swipe left | Next page |
+| Swipe right | Previous page |
+| Tap the page | Show / hide the menu |
 | Tap top-right corner | Bookmark this page |
 | Long-press text (finger) | Select → highlight, excerpt, copy, share, look up |
 | Long-press a PDF page (finger) | Select a region → save excerpt, copy text, highlight |
@@ -31,7 +31,7 @@ The library checks for a newer build every few hours and shows a banner when one
 | Tap the page number | Cycle: page · time left in chapter · time left in book · location |
 | Volume keys | Turn pages (can be turned off) |
 
-Your **finger** only turns pages, selects and opens menus. The **S Pen** only writes, draws, highlights and erases, and never turns pages. While the pen hovers near the screen, finger and palm touches are ignored.
+Your **finger** only turns pages, selects and opens menus. Tap-to-turn (left/right side of the page) can be switched on in **⋮ › Pen & touch settings**. The **S Pen** only writes, draws, highlights and erases, and never turns pages. While the pen hovers near the screen, finger and palm touches are ignored.
 
 ## Formats
 
