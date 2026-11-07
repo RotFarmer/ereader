@@ -21,7 +21,7 @@ data class Locator(val block: Int, val offset: Int) : Comparable<Locator> {
 }
 
 enum class BookFormat(val label: String) {
-    EPUB("EPUB"), PDF("PDF"), DOCX("WORD"), TXT("TEXT"), HTML("HTML");
+    EPUB("EPUB"), PDF("PDF"), DOCX("WORD"), TXT("TEXT"), HTML("HTML"), MOBI("MOBI");
 
     companion object {
         fun of(name: String?): BookFormat = values().firstOrNull { it.name == name } ?: EPUB

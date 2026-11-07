@@ -10,6 +10,7 @@ import com.rotfarmer.ereader.data.WritingSpace
 import com.rotfarmer.ereader.doc.DocxParser
 import com.rotfarmer.ereader.doc.EpubParser
 import com.rotfarmer.ereader.doc.FlowDocument
+import com.rotfarmer.ereader.doc.MobiParser
 import com.rotfarmer.ereader.doc.PdfDoc
 import com.rotfarmer.ereader.doc.TextParser
 import com.rotfarmer.ereader.ink.Anchor
@@ -67,6 +68,7 @@ class BookSession(private val app: App, val book: Book) {
             BookFormat.DOCX -> flow = DocxParser.parse(f, book.title)
             BookFormat.TXT -> flow = TextParser.parseText(f, book.title)
             BookFormat.HTML -> flow = TextParser.parseHtml(f, book.title)
+            BookFormat.MOBI -> flow = MobiParser.parse(f, book.title)
         }
         flow?.let { images = ImageCache(it.res) }
         ann.highlights += db.highlights(book.id)

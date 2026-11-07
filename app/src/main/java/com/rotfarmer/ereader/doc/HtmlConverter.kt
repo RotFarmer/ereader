@@ -99,6 +99,9 @@ class HtmlConverter(
         css?.propsFor(tag, el.classNames(), props)
         val inline = el.attr("style")
         if (inline.isNotEmpty()) props.putAll(CssLite.parseDecls(inline))
+        // Old HTML / Mobipocket: <p align="center">.
+        val alignAttr = el.attr("align")
+        if (alignAttr.isNotEmpty() && "text-align" !in props) props["text-align"] = alignAttr.lowercase()
         if (props["display"] == "none" || props["visibility"] == "hidden") return
 
         when (tag) {
@@ -110,6 +113,9 @@ class HtmlConverter(
             }
             "hr" -> {
                 flush(ctx); out.blocks.add(RuleBlock()); return
+            }
+            "pagebreak" -> { // <mbp:pagebreak/> in MOBI books
+                flush(ctx); out.startChapter(); return
             }
         }
 

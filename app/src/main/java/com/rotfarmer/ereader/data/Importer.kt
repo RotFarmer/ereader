@@ -15,6 +15,7 @@ import android.text.TextPaint
 import com.rotfarmer.ereader.App
 import com.rotfarmer.ereader.doc.DocxParser
 import com.rotfarmer.ereader.doc.EpubParser
+import com.rotfarmer.ereader.doc.MobiParser
 import com.rotfarmer.ereader.doc.PdfDoc
 import com.rotfarmer.ereader.render.Eink
 import com.rotfarmer.ereader.render.Fonts
@@ -64,13 +65,19 @@ object Importer {
                     author = a ?: ""
                 }
                 BookFormat.PDF -> PdfDoc(file).use { pdf -> if (pdf.pageCount > 0) cover = pdf.renderPage(0, 480) }
+                BookFormat.MOBI -> {
+                    val m = MobiParser.readMeta(file)
+                    title = m.title?.ifBlank { null } ?: baseName
+                    author = m.author ?: ""
+                    cover = m.cover?.let { decodeScaled(it, 480) }
+                }
                 else -> {}
             }
         } catch (e: IllegalArgumentException) {
             file.delete()
             throw ImportException(e.message ?: "This file couldn't be opened.")
         } catch (e: Exception) {
-            if (format == BookFormat.EPUB || format == BookFormat.PDF) {
+            if (format == BookFormat.EPUB || format == BookFormat.PDF || format == BookFormat.MOBI) {
                 file.delete()
                 throw ImportException("This ${format.label} file appears to be damaged.")
             }
@@ -102,8 +109,12 @@ object Importer {
     }
 
     fun detect(f: File, name: String): BookFormat {
-        val head = ByteArray(8)
+        val head = ByteArray(80)
         val n = f.inputStream().use { it.read(head) }
+        if (n >= 68) {
+            val pdbType = String(head, 60, 8, Charsets.ISO_8859_1)
+            if (pdbType == "BOOKMOBI" || pdbType == "TEXtREAd") return BookFormat.MOBI
+        }
         if (n >= 4 && head[0] == '%'.code.toByte() && head[1] == 'P'.code.toByte() && head[2] == 'D'.code.toByte() && head[3] == 'F'.code.toByte()) {
             return BookFormat.PDF
         }
@@ -126,7 +137,10 @@ object Importer {
         val ext = name.substringAfterLast('.', "").lowercase()
         if (ext in setOf("html", "htm", "xhtml")) return BookFormat.HTML
         if (ext == "txt" || ext == "md" || ext == "text" || looksLikeText(f)) return BookFormat.TXT
-        throw ImportException("“$name” isn't a supported file. You can add EPUB, PDF, Word (.docx) and text files.")
+        if (ext in setOf("azw", "azw3", "kfx", "azw4")) {
+            throw ImportException("“$name” is a Kindle Store file. These are usually copy-protected (DRM) and only open in Amazon's Kindle apps.")
+        }
+        throw ImportException("“$name” isn't a supported file. You can add EPUB, MOBI, PDF, Word (.docx) and text files.")
     }
 
     private fun looksLikeText(f: File): Boolean {

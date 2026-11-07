@@ -36,6 +36,7 @@ Your **finger** only turns pages, selects and opens menus. Tap-to-turn (left/rig
 ## Formats
 
 - **EPUB** (EPUB 2 and 3, with table of contents, images, basic styling, internal links)
+- **MOBI / PRC** (DRM-free Mobipocket books, including HUFF/CDIC-compressed ones; Kindle Store books with DRM can't be opened by any app except Amazon's)
 - **PDF** (rendered with Android's PDF engine; text copy needs Android 15+)
 - **Word .docx** (headings, bold/italic/underline, lists, pictures, page breaks)
 - Plain text and HTML

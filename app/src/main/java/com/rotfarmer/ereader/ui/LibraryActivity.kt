@@ -203,7 +203,7 @@ class LibraryActivity : Activity() {
         content.removeAllViews()
         if (settings.libraryTab == 0) {
             if (books.isEmpty()) {
-                content.addView(emptyView("Your library is empty", "Tap + to add EPUB, PDF or Word (.docx) files.\nYou can also open them from your file manager with E-Reader."))
+                content.addView(emptyView("Your library is empty", "Tap + to add EPUB, MOBI, PDF or Word (.docx) files.\nYou can also open them from your file manager with E-Reader."))
                 return
             }
             val grid = GridView(this).apply {
@@ -332,6 +332,7 @@ class LibraryActivity : Activity() {
                     "application/epub+zip", "application/pdf",
                     "application/vnd.openxmlformats-officedocument.wordprocessingml.document", "application/msword",
                     "text/plain", "text/html", "application/zip", "application/octet-stream",
+                    "application/x-mobipocket-ebook", "application/vnd.amazon.ebook", "application/vnd.palm",
                 )
             )
             .putExtra(Intent.EXTRA_ALLOW_MULTIPLE, true)

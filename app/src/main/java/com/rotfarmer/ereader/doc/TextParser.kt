@@ -36,8 +36,10 @@ object TextParser {
         }
     }
 
-    fun parseText(file: File, title: String): FlowDocument {
-        val text = decode(file.readBytes()).replace("\r\n", "\n").replace('\r', '\n')
+    fun parseText(file: File, title: String): FlowDocument = parseString(decode(file.readBytes()), title)
+
+    fun parseString(raw: String, title: String): FlowDocument {
+        val text = raw.replace("\r\n", "\n").replace('\r', '\n')
         val lines = text.split('\n')
         val blankLines = lines.count { it.isBlank() }
         val byBlank = blankLines > lines.size / 20
