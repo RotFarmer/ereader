@@ -85,6 +85,13 @@ class PenToolbar(ctx: Context, private val c: UiColors, private val settings: Se
         fun onRedo()
         fun onSideChanged()
         fun onExpandedChanged()
+        fun onHide()
+    }
+
+    private fun hideButton() = IconButton(context, "\ue8f5", c, 40).apply {
+        textSize = 19f
+        contentDescription = "Hide pen toolbar"
+        setOnClickListener { cb.onHide() }
     }
 
     private val samples = HashMap<Int, PenSample>()
@@ -118,6 +125,7 @@ class PenToolbar(ctx: Context, private val c: UiColors, private val settings: Se
         addView(toggle)
         if (!expanded) {
             addView(sample(settings.tool))
+            addView(hideButton())
             return
         }
         for (t in Tools.DRAWING) addView(sample(t))
@@ -151,6 +159,7 @@ class PenToolbar(ctx: Context, private val c: UiColors, private val settings: Se
                 cb.onSideChanged()
             }
         })
+        addView(hideButton())
     }
 
     private fun currentColor(): Int {

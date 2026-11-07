@@ -720,6 +720,18 @@ class ReaderActivity : Activity(), ReaderView.Listener, PenToolbar.Callbacks {
 
     override fun onExpandedChanged() {}
 
+    override fun onHide() {
+        settings.toolbarVisible = false
+        penBtn?.active = false
+        if (view.armedInsert) {
+            view.armedInsert = false; view.clearInsertMark()
+        }
+        popups.dismissAll()
+        buildToolbar()
+        rebuildEngine()
+        Toast.makeText(this, "Pen bar hidden. To show it: tap the top of the page, then the pen icon.", Toast.LENGTH_LONG).show()
+    }
+
     private fun updateUndo() {
         val s = session ?: return
         toolbar?.setUndoState(s.canUndo, s.canRedo)
