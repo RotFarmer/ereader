@@ -47,4 +47,4 @@ jobs:
             --target "$GITHUB_SHA" \
             --prerelease \
             --title "E-Reader build ${{ github.run_number }}" \
-            --notes "Built from ${GITHUB_REF_NAME} (${GITHUB_SHA::7}). Download E-Reader.apk on your tablet and open it to install. New builds install over old ones and keep your books and notes."
+            --notes "$(printf 'versionCode: %s\n\n%s\n\nBuilt from %s (%s). Download E-Reader.apk on your tablet and open it to install, or use Check for updates in the app. New builds install over old ones and keep your books and notes.' "${{ github.run_number }}" "$(git log -1 --pretty=%s)" "$GITHUB_REF_NAME" "${GITHUB_SHA::7}")"

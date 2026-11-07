@@ -38,6 +38,11 @@ import com.rotfarmer.ereader.data.Excerpt
 import com.rotfarmer.ereader.data.ImportException
 import com.rotfarmer.ereader.data.Importer
 import com.rotfarmer.ereader.render.ReaderColors
+import com.rotfarmer.ereader.update.UpdateException
+import com.rotfarmer.ereader.update.Updater
+import android.provider.Settings as AndroidSettings
+import android.text.InputType
+import android.widget.EditText
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -89,6 +94,9 @@ class LibraryActivity : Activity() {
     override fun onResume() {
         super.onResume()
         reload()
+        val last = settings.prefs.getLong("lastUpdateCheck", 0)
+        if (System.currentTimeMillis() - last > 6 * 3600_000L) checkForUpdates(manual = false)
+        else pendingUpdate?.let { showUpdateBanner(it) }
     }
 
     override fun onDestroy() {
@@ -151,6 +159,19 @@ class LibraryActivity : Activity() {
             contentDescription = "Add books"
             setOnClickListener { openPicker() }
         })
+        header.addView(IconButton(this, Icons.MORE, ui).apply {
+            contentDescription = "More"
+            setOnClickListener {
+                dialog(this@LibraryActivity, settings.dark)
+                    .setItems(arrayOf("Check for updates", "Update settings", "About")) { _, i ->
+                        when (i) {
+                            0 -> checkForUpdates(manual = true)
+                            1 -> tokenDialog()
+                            2 -> about()
+                        }
+                    }.show()
+            }
+        })
         root.addView(header)
 
         val tabs = Segmented(this, listOf("Books", "Excerpts"), settings.libraryTab, ui) {
@@ -167,6 +188,7 @@ class LibraryActivity : Activity() {
             setBackgroundColor(ui.soft)
         }
         root.addView(status)
+        pendingUpdate?.let { showUpdateBanner(it) }
         content = FrameLayout(this)
         root.addView(content, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f))
         setContentView(root)
@@ -369,6 +391,136 @@ class LibraryActivity : Activity() {
                 last?.let { open(it) }
             }
         }
+    }
+
+    // ------------------------------------------------------------------ updates
+
+    private var pendingUpdate: Updater.Release? = null
+    private var updating = false
+    private val token: String? get() = settings.prefs.getString("ghToken", null)?.ifBlank { null }
+
+    private fun checkForUpdates(manual: Boolean) {
+        if (updating) return
+        scope.launch {
+            if (manual) {
+                status?.text = "Checking for updates…"; status?.visibility = View.VISIBLE; status?.setOnClickListener(null)
+            }
+            try {
+                val rel = withContext(Dispatchers.IO) { Updater.check(token) }
+                settings.prefs.edit().putLong("lastUpdateCheck", System.currentTimeMillis()).apply()
+                val cur = Updater.installedBuild(this@LibraryActivity)
+                if (rel.build > cur) {
+                    pendingUpdate = rel
+                    showUpdateBanner(rel)
+                    if (manual) confirmUpdate(rel)
+                } else {
+                    pendingUpdate = null
+                    status?.visibility = View.GONE
+                    if (manual) dialog(this@LibraryActivity, settings.dark).setTitle("You're up to date")
+                        .setMessage("You have the newest build ($cur).").setPositiveButton("OK", null).show()
+                }
+            } catch (e: UpdateException) {
+                status?.visibility = View.GONE
+                if (manual) {
+                    val d = dialog(this@LibraryActivity, settings.dark).setTitle("Couldn't check for updates")
+                        .setMessage(e.message).setPositiveButton("OK", null)
+                    if (e.message == Updater.PRIVATE_REPO_MESSAGE || e.message?.contains("token") == true) {
+                        d.setNeutralButton("Add token") { _, _ -> tokenDialog() }
+                    }
+                    d.show()
+                }
+            }
+        }
+    }
+
+    private fun showUpdateBanner(rel: Updater.Release) {
+        if (updating) return
+        status?.apply {
+            text = "A new version is available (build ${rel.build}). Tap to update."
+            setTextColor(ui.fg)
+            visibility = View.VISIBLE
+            setOnClickListener { confirmUpdate(rel) }
+        }
+    }
+
+    private fun confirmUpdate(rel: Updater.Release) {
+        val cur = Updater.installedBuild(this)
+        val notes = rel.notes.lines().filter { it.isNotBlank() && !it.startsWith("versionCode") }.joinToString("\n").take(600)
+        dialog(this, settings.dark).setTitle("Update to build ${rel.build}?")
+            .setMessage("You have build $cur. Your books, highlights and drawings are kept.\n\n$notes")
+            .setPositiveButton("Update") { _, _ -> startUpdate(rel) }
+            .setNegativeButton("Later", null).show()
+    }
+
+    private fun startUpdate(rel: Updater.Release) {
+        if (!packageManager.canRequestPackageInstalls()) {
+            dialog(this, settings.dark).setTitle("One-time permission")
+                .setMessage("To update itself, E-Reader needs permission to install apps. On the next screen, switch on “Allow from this source”, then come back and tap the update banner again.")
+                .setPositiveButton("Continue") { _, _ ->
+                    try {
+                        startActivity(Intent(AndroidSettings.ACTION_MANAGE_UNKNOWN_APP_SOURCES, Uri.parse("package:$packageName")))
+                    } catch (e: Exception) {
+                        Toast.makeText(this, "Open Settings › Apps › E-Reader › Install unknown apps", Toast.LENGTH_LONG).show()
+                    }
+                }
+                .setNegativeButton("Cancel", null).show()
+            return
+        }
+        updating = true
+        status?.apply { visibility = View.VISIBLE; setOnClickListener(null); text = "Downloading update…" }
+        scope.launch {
+            try {
+                val file = withContext(Dispatchers.IO) {
+                    Updater.download(this@LibraryActivity, rel, token) { pct ->
+                        main.post { status?.text = if (pct >= 0) "Downloading update… $pct%" else "Downloading update…" }
+                    }
+                }
+                status?.text = "Installing… confirm the update when Android asks."
+                withContext(Dispatchers.IO) { Updater.install(this@LibraryActivity, file) }
+            } catch (e: UpdateException) {
+                status?.visibility = View.GONE
+                dialog(this@LibraryActivity, settings.dark).setTitle("Update failed").setMessage(e.message).setPositiveButton("OK", null).show()
+            } catch (e: Exception) {
+                status?.visibility = View.GONE
+                dialog(this@LibraryActivity, settings.dark).setTitle("Update failed").setMessage(e.message ?: e.javaClass.simpleName).setPositiveButton("OK", null).show()
+            } finally {
+                updating = false
+            }
+        }
+    }
+
+    private fun tokenDialog() {
+        val input = EditText(this).apply {
+            hint = "github_pat_…"
+            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD
+            setText(token.orEmpty())
+        }
+        val msg = label(this, "The app downloads updates from the GitHub repository ${Updater.REPO}. " +
+            "If that repository is private, the app needs a read-only token to see the updates.\n\n" +
+            "To make one: github.com › Settings › Developer settings › Fine-grained tokens › Generate. " +
+            "Choose only the ereader repository and set Contents to Read-only.\n\n" +
+            "If the repository is public, leave this empty. The token is stored only on this device.", ui, 14f, ui.muted)
+        val wrap = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(22), dp(8), dp(22), 0)
+            addView(msg)
+            addView(input)
+        }
+        dialog(this, settings.dark).setTitle("Update settings").setView(wrap)
+            .setPositiveButton("Save") { _, _ ->
+                settings.prefs.edit().putString("ghToken", input.text.toString().trim()).apply()
+                checkForUpdates(manual = true)
+            }
+            .setNeutralButton("Clear") { _, _ -> settings.prefs.edit().remove("ghToken").apply() }
+            .setNegativeButton("Cancel", null).show()
+    }
+
+    private fun about() {
+        dialog(this, settings.dark).setTitle("E-Reader")
+            .setMessage("Version ${Updater.installedVersion(this)} (build ${Updater.installedBuild(this)})\n\nUpdates come from github.com/${Updater.REPO}.")
+            .setPositiveButton("OK", null)
+            .setNeutralButton("Check for updates") { _, _ -> checkForUpdates(manual = true) }
+            .show()
     }
 
     // ------------------------------------------------------------------ adapters
