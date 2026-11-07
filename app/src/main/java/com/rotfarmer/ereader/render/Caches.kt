@@ -28,6 +28,13 @@ class ImageCache(private val res: ResourceSource) {
     var onLoaded: (() -> Unit)? = null
     private val lru = bitmapLru(8)
     private val sizes = ConcurrentHashMap<String, Size>()
+    private val lineArt = ConcurrentHashMap<String, Boolean>()
+
+    /**
+     * True for drawings / line art on a light or transparent background (as opposed to photos).
+     * These are inverted in dark mode so they look like the text. Known once the picture has loaded.
+     */
+    fun isLineArt(path: String): Boolean = lineArt[path] == true
     private val pending = HashSet<String>()
     private val exec = worker("images")
 
@@ -72,6 +79,7 @@ class ImageCache(private val res: ResourceSource) {
         val o = BitmapFactory.Options().apply { inSampleSize = sample }
         val raw = res.open(path)?.use { BitmapFactory.decodeStream(it, null, o) } ?: return null
         var bmp = if (raw.width != w || raw.height != h) Bitmap.createScaledBitmap(raw, w.coerceAtLeast(1), h.coerceAtLeast(1), true).also { if (it !== raw) raw.recycle() } else raw
+        lineArt[path] = looksLikeLineArt(bmp)
         if (eink) {
             if (!bmp.isMutable) bmp = bmp.copy(Bitmap.Config.ARGB_8888, true)
             Eink.process(bmp)
@@ -79,6 +87,40 @@ class ImageCache(private val res: ResourceSource) {
         bmp
     } catch (e: Throwable) {
         null
+    }
+
+    /** Mostly light or transparent, with little colour: a drawing rather than a photo. */
+    private fun looksLikeLineArt(b: Bitmap): Boolean {
+        val w = b.width
+        val h = b.height
+        if (w <= 0 || h <= 0) return false
+        val step = maxOf(1, kotlin.math.sqrt(w.toDouble() * h / 5000.0).toInt())
+        var n = 0
+        var light = 0
+        var satSum = 0f
+        var y = 0
+        while (y < h) {
+            var x = 0
+            while (x < w) {
+                val c = b.getPixel(x, y)
+                val a = c ushr 24
+                n++
+                if (a < 60) {
+                    light++
+                } else {
+                    val r = (c shr 16) and 0xFF
+                    val g = (c shr 8) and 0xFF
+                    val bl = c and 0xFF
+                    val mx = maxOf(r, g, bl)
+                    val mn = minOf(r, g, bl)
+                    if ((mx + mn) / 2 > 200) light++
+                    if (mx > 0) satSum += (mx - mn).toFloat() / mx
+                }
+                x += step
+            }
+            y += step
+        }
+        return n > 0 && light.toFloat() / n > 0.4f && satSum / n < 0.22f
     }
 
     fun close() {

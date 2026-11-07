@@ -75,7 +75,9 @@ class PageRenderer(private val density: Float) {
             c.drawRect(item.rect, linePaint)
             return
         }
-        bmpPaint.colorFilter = colors.imageFilter
+        // In dark mode, drawings on a white background are inverted like the text; photos are only dimmed.
+        val invert = colors.dark && images?.isLineArt(item.path) == true
+        bmpPaint.colorFilter = if (invert) colors.pdfFilter else colors.imageFilter
         c.drawBitmap(bmp, null, item.rect, bmpPaint)
     }
 
