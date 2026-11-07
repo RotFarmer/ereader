@@ -72,6 +72,13 @@ class ImageCache(private val res: ResourceSource) {
         return null
     }
 
+    /** Like [get] but decodes right away on the calling thread (for drawing thumbnails off-screen). */
+    fun getBlocking(path: String, w: Int, h: Int, eink: Boolean): Bitmap? {
+        val key = "$path|$w|$h|$eink"
+        lru.get(key)?.let { return it }
+        return decode(path, w, h, eink)?.also { lru.put(key, it) }
+    }
+
     private fun decode(path: String, w: Int, h: Int, eink: Boolean): Bitmap? = try {
         val src = size(path) ?: return null
         var sample = 1

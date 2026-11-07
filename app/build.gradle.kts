@@ -53,5 +53,7 @@ android {
 
 dependencies {
     implementation("org.jsoup:jsoup:1.18.3")
+    // On-device text recognition (offline), used to check whether a cover shows the title.
+    implementation("com.google.mlkit:text-recognition:16.0.0")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.9.0")
 }

@@ -33,6 +33,8 @@ import android.widget.TextView
 import android.widget.Toast
 import com.rotfarmer.ereader.App
 import com.rotfarmer.ereader.data.Book
+import com.rotfarmer.ereader.data.BookFormat
+import com.rotfarmer.ereader.data.Covers
 import com.rotfarmer.ereader.data.Db
 import com.rotfarmer.ereader.data.Excerpt
 import com.rotfarmer.ereader.data.ImportException
@@ -260,6 +262,7 @@ class LibraryActivity : Activity() {
             showTab()
             bookAdapter.notifyDataSetChanged()
             excerptAdapter.notifyDataSetChanged()
+            checkCovers()
         }
     }
 
@@ -279,10 +282,11 @@ class LibraryActivity : Activity() {
 
     private fun bookMenu(b: Book) {
         dialog(this, settings.dark).setTitle(b.title)
-            .setItems(arrayOf("Open", "Remove from library")) { _, i ->
+            .setItems(arrayOf("Open", "Change cover…", "Remove from library")) { _, i ->
                 when (i) {
                     0 -> open(b)
-                    1 -> dialog(this, settings.dark)
+                    1 -> changeCover(b)
+                    2 -> dialog(this, settings.dark)
                         .setMessage("Remove “${b.title}” and all its highlights, notes and drawings from this device?")
                         .setPositiveButton("Remove") { _, _ ->
                             scope.launch {
@@ -295,6 +299,65 @@ class LibraryActivity : Activity() {
                             }
                         }
                         .setNegativeButton("Cancel", null).show()
+                }
+            }.show()
+    }
+
+    // ------------------------------------------------------------------ covers
+
+    private var coverCheckRunning = false
+
+    /** Once per book: if its cover picture doesn't show the title, use the title page. */
+    private fun checkCovers() {
+        if (coverCheckRunning) return
+        val todo = books.filter { (it.format == BookFormat.EPUB || it.format == BookFormat.MOBI) && !Covers.isChecked(app, it.id) }
+        if (todo.isEmpty()) return
+        coverCheckRunning = true
+        scope.launch {
+            for (b in todo) {
+                val changed = withContext(Dispatchers.IO) {
+                    try {
+                        val better = Covers.betterThan(app, b, Covers.coverPicture(b))
+                        if (better != null) Covers.save(app, b, better)
+                        better != null
+                    } catch (e: Throwable) {
+                        false
+                    }
+                }
+                Covers.markChecked(app, b.id)
+                if (changed) {
+                    b.coverPath?.let { covers.remove(it) }
+                    bookAdapter.notifyDataSetChanged()
+                }
+            }
+            coverCheckRunning = false
+        }
+    }
+
+    private fun changeCover(b: Book) {
+        val options = arrayOf("The book's cover picture", "The title page", "Plain: title and author")
+        dialog(this, settings.dark).setTitle("Cover for “${b.title}”")
+            .setItems(options) { _, i ->
+                scope.launch {
+                    val bmp = withContext(Dispatchers.IO) {
+                        try {
+                            when (i) {
+                                0 -> Covers.coverPicture(b)
+                                1 -> Covers.titlePage(app, b)
+                                else -> Importer.generateCover(app, b.title, b.author, b.format)
+                            }
+                        } catch (e: Throwable) {
+                            null
+                        }
+                    }
+                    if (bmp == null) {
+                        Toast.makeText(this@LibraryActivity, if (i == 0) "This book has no cover picture" else "Couldn't find a title page", Toast.LENGTH_SHORT).show()
+                        return@launch
+                    }
+                    withContext(Dispatchers.IO) { Covers.save(app, b, bmp) }
+                    Covers.markChecked(app, b.id)
+                    b.coverPath?.let { covers.remove(it) }
+                    bookAdapter.notifyDataSetChanged()
                 }
             }.show()
     }

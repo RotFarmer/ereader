@@ -88,14 +88,12 @@ object Importer {
             return existing
         }
         val coverFile = File(app.coversDir, "$id.jpg")
-        var bmp = cover ?: generateCover(app, title, author, format)
-        if (app.settings.einkImages) {
-            if (!bmp.isMutable) bmp = bmp.copy(Bitmap.Config.ARGB_8888, true)
-            Eink.process(bmp)
-        }
-        coverFile.outputStream().use { bmp.compress(Bitmap.CompressFormat.JPEG, 90, it) }
         val now = System.currentTimeMillis()
         val book = Book(id, title, author, format, file.absolutePath, coverFile.absolutePath, now, 0, 0f, Locator(0, 0))
+        // If the cover picture doesn't show the title, use the book's title page instead.
+        val bmp = Covers.betterThan(app, book, cover) ?: cover ?: generateCover(app, title, author, format)
+        Covers.save(app, book, bmp)
+        Covers.markChecked(app, id)
         app.db.insertBook(book)
         return book
     }
@@ -151,7 +149,7 @@ object Importer {
         return true
     }
 
-    private fun decodeScaled(bytes: ByteArray, width: Int): Bitmap? {
+    fun decodeScaled(bytes: ByteArray, width: Int): Bitmap? {
         val o = BitmapFactory.Options().apply { inJustDecodeBounds = true }
         BitmapFactory.decodeByteArray(bytes, 0, bytes.size, o)
         if (o.outWidth <= 0) return null

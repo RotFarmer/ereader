@@ -98,6 +98,84 @@ object EpubParser {
         return HtmlConverter.resolvePath(opf.dir, item.attr("href")).takeIf { src.has(it) }
     }
 
+    /** Converts one content document of the book into blocks. */
+    private fun convertFile(src: ZipSource, path: String, bytes: ByteArray, type: String, out: DocBuilder, cssCache: HashMap<String, String>) {
+        val isXml = type.contains("xhtml") || type.contains("xml") || path.endsWith(".xhtml", true)
+        val doc = Jsoup.parse(ByteArrayInputStream(bytes), null, "", if (isXml) Parser.xmlParser() else Parser.htmlParser())
+        val dir = path.substringBeforeLast('/', "")
+        val css = CssLite()
+        for (el in doc.allElements) {
+            when (el.local()) {
+                "link" -> if (el.attr("rel").contains("stylesheet", true)) {
+                    val cssPath = HtmlConverter.resolvePath(dir, el.attr("href"))
+                    css.parse(cssCache.getOrPut(cssPath) { src.bytes(cssPath)?.let { String(it, Charsets.UTF_8) } ?: "" })
+                }
+                "style" -> css.parse(el.data())
+            }
+        }
+        val body = doc.allElements.firstOrNull { it.local() == "body" } ?: doc
+        HtmlConverter(out, path, dir, css).convert(body)
+    }
+
+    /**
+     * Just the book's title page, for use as a thumbnail. Found from the book's own landmarks or
+     * guide, else a file named like a title page, else the first early page that contains the title.
+     */
+    fun titlePage(file: File, title: String?): FlowDocument? {
+        val src = ZipSource(file)
+        try {
+            val opf = readOpf(src)
+            val spine = opf.doc.allElements.filter { it.local() == "itemref" }.mapNotNull { opf.items[it.attr("idref")] }
+            fun pathOf(item: Element) = HtmlConverter.resolvePath(opf.dir, item.attr("href"))
+            val coverPaths = HashSet<String>()
+            opf.doc.allElements.filter { it.local() == "reference" && it.attr("type").equals("cover", true) }
+                .forEach { coverPaths += HtmlConverter.resolvePath(opf.dir, it.attr("href").substringBefore('#')) }
+            spine.filter { (it.attr("id") + " " + it.attr("href")).contains("cover", true) }.forEach { coverPaths += pathOf(it) }
+
+            var target: String? = opf.doc.allElements.firstOrNull {
+                it.local() == "reference" && it.attr("type").replace("-", "").equals("titlepage", true)
+            }?.let { HtmlConverter.resolvePath(opf.dir, it.attr("href").substringBefore('#')) }
+
+            if (target == null) {
+                val navItem = opf.items.values.firstOrNull { it.attr("properties").split(' ').contains("nav") }
+                if (navItem != null) {
+                    val navPath = pathOf(navItem)
+                    src.xml(navPath)?.allElements?.firstOrNull {
+                        it.local() == "a" && it.attr("epub:type").split(' ').any { t -> t.equals("titlepage", true) }
+                    }?.let { target = HtmlConverter.resolvePath(navPath.substringBeforeLast('/', ""), it.attr("href").substringBefore('#')) }
+                }
+            }
+            if (target == null) {
+                target = spine.firstOrNull {
+                    val s = (it.attr("id") + " " + it.attr("href")).lowercase()
+                    "title" in s && "cover" !in s
+                }?.let { pathOf(it) }
+            }
+            if (target == null && !title.isNullOrBlank()) {
+                val words = title.lowercase().split(Regex("[^\\p{L}\\p{N}]+")).filter { it.length >= 3 }.take(3)
+                if (words.isNotEmpty()) {
+                    for (item in spine.take(10)) {
+                        val p = pathOf(item)
+                        if (p in coverPaths) continue
+                        val text = src.bytes(p)?.let { Jsoup.parse(String(it, Charsets.UTF_8)).text().lowercase().take(3000) } ?: continue
+                        if (words.all { it in text }) {
+                            target = p; break
+                        }
+                    }
+                }
+            }
+            val path = target ?: run { src.close(); return null }
+            val item = spine.firstOrNull { pathOf(it) == path }
+            val bytes = src.bytes(path) ?: run { src.close(); return null }
+            val out = DocBuilder()
+            convertFile(src, path, bytes, item?.attr("media-type") ?: "application/xhtml+xml", out, HashMap())
+            return out.build(title ?: "", "", src)
+        } catch (e: Throwable) {
+            src.close()
+            return null
+        }
+    }
+
     fun parse(file: File, fallbackTitle: String): FlowDocument {
         val src = ZipSource(file)
         try {
@@ -115,22 +193,7 @@ object EpubParser {
                 out.startChapter()
                 fileStarts[path] = Locator(out.blocks.size, 0)
                 out.anchors[path] = Locator(out.blocks.size, 0)
-                val type = item.attr("media-type")
-                val isXml = type.contains("xhtml") || type.contains("xml") || path.endsWith(".xhtml", true)
-                val doc = Jsoup.parse(ByteArrayInputStream(bytes), null, "", if (isXml) Parser.xmlParser() else Parser.htmlParser())
-                val dir = path.substringBeforeLast('/', "")
-                val css = CssLite()
-                for (el in doc.allElements) {
-                    when (el.local()) {
-                        "link" -> if (el.attr("rel").contains("stylesheet", true)) {
-                            val cssPath = HtmlConverter.resolvePath(dir, el.attr("href"))
-                            css.parse(cssCache.getOrPut(cssPath) { src.bytes(cssPath)?.let { String(it, Charsets.UTF_8) } ?: "" })
-                        }
-                        "style" -> css.parse(el.data())
-                    }
-                }
-                val body = doc.allElements.firstOrNull { it.local() == "body" } ?: doc
-                HtmlConverter(out, path, dir, css).convert(body)
+                convertFile(src, path, bytes, item.attr("media-type"), out, cssCache)
             }
 
             fun resolve(base: String, href: String): Locator? {
