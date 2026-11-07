@@ -40,6 +40,7 @@ class PageRenderer(private val density: Float) {
                 is SpaceItem -> {
                     drawSpace(c, item.rect, item.space.paper, item.space.kind == WritingSpace.PDF_BLANK)
                     if (item.space.kind == WritingSpace.FLOW) drawGrip(c, item.rect)
+                    drawClose(c, item.rect)
                 }
                 is PdfSliceItem -> drawPdf(c, item)
             }
@@ -110,6 +111,20 @@ class PageRenderer(private val density: Float) {
         }
     }
 
+    /** A small × in the top-right corner: tap it to delete the space. */
+    private fun drawClose(c: Canvas, r: RectF) {
+        val p = closeCenter(r, density)
+        val rad = 9 * density
+        linePaint.style = Paint.Style.STROKE
+        linePaint.color = colors.muted
+        linePaint.strokeWidth = 1.2f * density
+        c.drawCircle(p.x, p.y, rad, linePaint)
+        val k = rad * 0.45f
+        c.drawLine(p.x - k, p.y - k, p.x + k, p.y + k, linePaint)
+        c.drawLine(p.x - k, p.y + k, p.x + k, p.y - k, linePaint)
+        linePaint.strokeWidth = density
+    }
+
     /** A small handle on the bottom edge: drag it to resize the space. */
     private fun drawGrip(c: Canvas, r: RectF) {
         linePaint.style = Paint.Style.FILL
@@ -176,6 +191,8 @@ class PageRenderer(private val density: Float) {
     }
 
     companion object {
+        fun closeCenter(r: RectF, density: Float) = android.graphics.PointF(r.right - 18 * density, r.top + 18 * density)
+
         /** The part of [start, end) that falls inside a text item, as absolute block offsets. */
         fun clip(item: TextItem, start: Locator, end: Locator): Pair<Int, Int>? {
             if (item.block < start.block || item.block > end.block) return null

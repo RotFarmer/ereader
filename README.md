@@ -58,7 +58,7 @@ Tap the ⇕ button on the pen toolbar, then tap the page where you want room to 
 - In books, choose a small, half, large or full-page space. It stays attached to that spot in the text even if you change the font size.
 - In PDFs, **split the page** at that point (the rest of the page moves to the next screen), or add a **blank page** after it.
 
-Long-press a writing space to switch between blank, lined, grid and dotted paper, resize it, or delete it.
+Tap the **×** in a writing space's corner to delete it (an Undo button appears for a few seconds). Drag its bottom edge to resize it. Long-press it to switch between blank, lined, grid and dotted paper.
 
 ## Notebook and excerpts
 

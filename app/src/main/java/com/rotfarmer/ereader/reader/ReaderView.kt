@@ -83,6 +83,8 @@ class ReaderView(ctx: Context) : View(ctx) {
         fun onInsertSpaceSized(loc: Locator, height: Float)
         /** The bottom edge of a writing space was dragged to a new [height]. */
         fun onSpaceResized(space: WritingSpace, height: Float)
+        /** The × on a writing space was tapped. */
+        fun onDeleteSpace(space: WritingSpace)
         fun onStrokeAdded(s: InkStroke)
         fun onStrokesErased(list: List<InkStroke>, highlights: List<Highlight>)
         fun onSmartHighlight(start: Locator, end: Locator, color: Int)
@@ -183,6 +185,8 @@ class ReaderView(ctx: Context) : View(ctx) {
     private var insertCurY = 0f
     private var insertDragging = false
     private var resizing: SpaceItem? = null
+    /** Finger went down on a space's bottom edge; becomes [resizing] once it moves vertically. */
+    private var resizeCandidate: SpaceItem? = null
     private var resizeY = 0f
 
     // ------------------------------------------------------------- input
@@ -994,6 +998,18 @@ class ReaderView(ctx: Context) : View(ctx) {
         return ((y - top) / s.content.height()).coerceIn(MIN_SPACE, 1f)
     }
 
+    /** The writing space whose × (top-right corner) is under (x, y), in view coordinates. */
+    private fun spaceCloseAt(x: Float, y: Float): SpaceItem? {
+        val page = currentPage() ?: return null
+        val p = toPage(x, y)
+        for (it in page.items) {
+            if (it !is SpaceItem) continue
+            val c = PageRenderer.closeCenter(it.rect, density)
+            if (hypot(p.x - c.x, p.y - c.y) < dp(24f)) return it
+        }
+        return null
+    }
+
     /** A flow writing space whose bottom edge (grip) is under the finger. */
     private fun spaceEdgeAt(x: Float, y: Float): SpaceItem? {
         if (engine?.isFixed != false) return null
@@ -1053,6 +1069,7 @@ class ReaderView(ctx: Context) : View(ctx) {
         removeCallbacks(longPress)
         fActive = false
         dragHandle = 0
+        resizeCandidate = null
         if (resizing != null) {
             resizing = null; invalidate()
         }
@@ -1071,13 +1088,9 @@ class ReaderView(ctx: Context) : View(ctx) {
                     startPen(e, 0, false, finger = true)
                     return true
                 }
-                spaceEdgeAt(e.x, e.y)?.let {
-                    resizing = it
-                    resizeY = it.rect.bottom
-                    invalidate()
-                    return true
-                }
-                if (fingerDraw) {
+                resizeCandidate = spaceEdgeAt(e.x, e.y)
+                resizing = null
+                if (fingerDraw && resizeCandidate == null) {
                     startPen(e, 0, false, finger = true)
                     return true
                 }
@@ -1112,10 +1125,18 @@ class ReaderView(ctx: Context) : View(ctx) {
                     fMoved = true
                     removeCallbacks(longPress)
                 }
-                if (resizing != null) {
-                    if (fMoved) {
-                        resizeY = e.y; invalidate()
+                val cand = resizeCandidate
+                if (resizing == null && cand != null && fMoved) {
+                    resizeCandidate = null
+                    if (abs(dy) > abs(dx)) {
+                        resizing = cand
+                        removeCallbacks(longPress)
                     }
+                }
+                resizing?.let { r ->
+                    // The edge follows the finger from wherever it was grabbed.
+                    resizeY = r.rect.bottom + dy
+                    invalidate()
                     return true
                 }
                 if (dragHandle != 0) {
@@ -1147,16 +1168,11 @@ class ReaderView(ctx: Context) : View(ctx) {
                 if (!fActive) return true
                 fActive = false
                 if (fIgnore) return true
+                resizeCandidate = null
                 resizing?.let { sp ->
                     resizing = null
                     invalidate()
-                    val dx = e.x - fDownX
-                    val dy = e.y - fDownY
-                    when {
-                        abs(dy) > slop -> listener?.onSpaceResized(sp.space, dragHeight(sp.rect.top, e.y))
-                        abs(dx) > dp(40f) -> swipe(dx)
-                        !fMoved -> tap(e.x, e.y)
-                    }
+                    listener?.onSpaceResized(sp.space, dragHeight(sp.rect.top, sp.rect.bottom + (e.y - fDownY)))
                     return true
                 }
                 if (dragHandle != 0) {
@@ -1202,6 +1218,9 @@ class ReaderView(ctx: Context) : View(ctx) {
         }
         if (armedInsert) {
             insertAt(x, y); return
+        }
+        spaceCloseAt(x, y)?.let {
+            listener?.onDeleteSpace(it.space); return
         }
         if (x > width - dp(64f) && y < dp(64f)) {
             listener?.onToggleBookmark(); return
@@ -1251,6 +1270,7 @@ class ReaderView(ctx: Context) : View(ctx) {
 
     private fun onLongPress() {
         if (!fActive || fMoved || fIgnore || fMulti) return
+        resizeCandidate = null
         val page = currentPage() ?: return
         val p = toPage(fDownX, fDownY)
         val e = engine ?: return

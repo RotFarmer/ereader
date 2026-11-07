@@ -563,16 +563,7 @@ class ReaderActivity : Activity(), ReaderView.Listener, PenToolbar.Callbacks {
         }
         c.addView(View(this), LinearLayout.LayoutParams(1, dp(12)))
         c.addView(TextButton(this, "Delete space and its writing", ui).apply {
-            setOnClickListener {
-                popups.dismissAll()
-                dialog(this@ReaderActivity, settings.dark).setMessage("Delete this writing space and everything written in it?")
-                    .setPositiveButton("Delete") { _, _ ->
-                        s.deleteSpace(space)
-                        spacesChanged(if (space.kind == WritingSpace.FLOW) space.loc.block else -1)
-                        toast("Space deleted (Undo on the pen bar brings it back)")
-                    }
-                    .setNegativeButton("Cancel", null).show()
-            }
+            setOnClickListener { onDeleteSpace(space) }
         })
         popups.show(c, anchor, below = true)
     }
@@ -628,6 +619,31 @@ class ReaderActivity : Activity(), ReaderView.Listener, PenToolbar.Callbacks {
         val sp = WritingSpace(Ids.next(), s.book.id, WritingSpace.FLOW, loc, height, WritingSpace.PAPER_DOTS, System.currentTimeMillis())
         s.addSpace(sp)
         spacesChanged(loc.block)
+    }
+
+    override fun onDeleteSpace(space: WritingSpace) {
+        val s = session ?: return
+        popups.dismissAll()
+        s.deleteSpace(space)
+        spacesChanged(if (space.kind == WritingSpace.FLOW) space.loc.block else -1)
+        showUndoChip("Writing space deleted")
+    }
+
+    private var undoChip: TextButton? = null
+
+    /** A temporary "Undo" button at the bottom, for actions that are easy to do by accident. */
+    private fun showUndoChip(what: String) {
+        undoChip?.let { root.removeView(it) }
+        val chip = TextButton(this, "$what  ·  Undo", ui, filled = true)
+        chip.setOnClickListener {
+            root.removeView(chip); undoChip = null
+            onUndo()
+        }
+        val lp = FrameLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT, Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL)
+        lp.bottomMargin = dp(56)
+        root.addView(chip, lp)
+        undoChip = chip
+        chip.postDelayed({ if (undoChip === chip) { root.removeView(chip); undoChip = null } }, 7_000)
     }
 
     override fun onSpaceResized(space: WritingSpace, height: Float) {
