@@ -73,6 +73,7 @@ Tap the **×** in a writing space's corner to delete it (an Undo button appears 
 
 <img src="docs/font-samples.png" width="360" alt="Font samples">
 - Text size, line spacing, margins, justification and paragraph indents.
+- Two pages side by side in landscape (books as two columns, PDFs as facing pages); can be turned off under **Aa**.
 - E-ink effects: paper grain, page-refresh flash (off / every page / every 6 pages), optional ghosting, and pictures shown in 16 dithered grays like a real e-ink panel.
 
 ## Building

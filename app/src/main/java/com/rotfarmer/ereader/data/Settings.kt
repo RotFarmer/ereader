@@ -22,6 +22,7 @@ class Settings(ctx: Context) {
     var margins by int("margins", 1)
     var justify by bool("justify", true)
     var indent by bool("indent", true)
+    var twoPages by bool("twoPages", true)
 
     // E-ink effects
     var paperTexture by bool("paperTexture", true)

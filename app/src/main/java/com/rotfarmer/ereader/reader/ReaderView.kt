@@ -181,6 +181,10 @@ class ReaderView(ctx: Context) : View(ctx) {
     private var locateRegion: RectF? = null
     private var locateUntil = 0L
     private var insertMarkY = -1f
+    private var insertMarkL = 0f
+    private var insertMarkR = 0f
+    /** PDF page shown sharp when zoomed (in two-page mode, the one being zoomed into). */
+    private var hiResPage = -1
     // Sizing writing spaces by hand.
     private var insertTarget: Locator? = null
     private var insertDownY = 0f
@@ -419,7 +423,7 @@ class ReaderView(ctx: Context) : View(ctx) {
     private fun drawHiRes(canvas: Canvas, page: Page) {
         val bmp = hiRes ?: return
         if (hiResKey != zoomKey()) return
-        val slice = page.items.filterIsInstance<PdfSliceItem>().firstOrNull() ?: return
+        val slice = page.items.filterIsInstance<PdfSliceItem>().firstOrNull { it.page == hiResPage } ?: return
         val r = RectF(slice.rect)
         zoomMatrix.mapRect(r)
         canvas.save()
@@ -491,13 +495,15 @@ class ReaderView(ctx: Context) : View(ctx) {
         overlay.strokeWidth = dp(2f)
         overlay.color = colors.text
         overlay.pathEffect = DashPathEffect(floatArrayOf(dp(8f), dp(5f)), 0f)
-        c.drawLine(s.content.left, insertMarkY, s.content.right, insertMarkY, overlay)
+        val ml = if (insertMarkR > insertMarkL) insertMarkL else s.content.left
+        val mr = if (insertMarkR > insertMarkL) insertMarkR else s.content.right
+        c.drawLine(ml, insertMarkY, mr, insertMarkY, overlay)
         overlay.pathEffect = null
         overlay.style = Paint.Style.FILL
         val path = Path().apply {
-            moveTo(s.content.left - dp(10f), insertMarkY - dp(6f))
-            lineTo(s.content.left - dp(2f), insertMarkY)
-            lineTo(s.content.left - dp(10f), insertMarkY + dp(6f))
+            moveTo(ml - dp(10f), insertMarkY - dp(6f))
+            lineTo(ml - dp(2f), insertMarkY)
+            lineTo(ml - dp(10f), insertMarkY + dp(6f))
             close()
         }
         c.drawPath(path, overlay)
@@ -513,7 +519,7 @@ class ReaderView(ctx: Context) : View(ctx) {
         }
         val fy = height - dp(14f)
         c.drawText(footerLeft, s.content.left, fy, textPaint)
-        c.drawText(footerRight, s.content.right - textPaint.measureText(footerRight), fy, textPaint)
+        c.drawText(footerRight, s.fullRight - textPaint.measureText(footerRight), fy, textPaint)
         if (bookmarked) {
             overlay.style = Paint.Style.FILL
             overlay.color = colors.text
@@ -625,7 +631,12 @@ class ReaderView(ctx: Context) : View(ctx) {
         var bestD = Float.MAX_VALUE
         for (item in page.items) {
             if (item !is TextItem) continue
-            val d = when {
+            val dx = when {
+                x < item.colLeft -> item.colLeft - x
+                x > item.colRight -> x - item.colRight
+                else -> 0f
+            }
+            val d = dx * 10f + when {
                 y < item.rect.top -> item.rect.top - y
                 y > item.rect.bottom -> y - item.rect.bottom
                 else -> 0f
@@ -953,8 +964,10 @@ class ReaderView(ctx: Context) : View(ctx) {
     private fun insertAt(sx: Float, sy: Float) {
         val page = currentPage() ?: return
         val p = toPage(sx, sy)
-        val item = Anchoring.itemAt(page, p.y) ?: return
+        val item = Anchoring.itemAt(page, p.x, p.y) ?: return
         val anchor = RectF(sx - 1, sy - 1, sx + 1, sy + 1)
+        insertMarkL = item.colLeft
+        insertMarkR = item.colRight
         if (engine?.isFixed == true) {
             when (item) {
                 is PdfSliceItem -> {
@@ -976,7 +989,10 @@ class ReaderView(ctx: Context) : View(ctx) {
 
     /** Where a writing space tapped at page point [p] goes, and the y of that spot. */
     private fun flowInsertTarget(page: Page, p: PointF): Pair<Locator, Float>? {
-        return when (val item = Anchoring.itemAt(page, p.y) ?: return null) {
+        val found = Anchoring.itemAt(page, p.x, p.y) ?: return null
+        insertMarkL = found.colLeft
+        insertMarkR = found.colRight
+        return when (val item = found) {
             is TextItem -> {
                 val line = item.lineAt(p.y)
                 val mid = (item.lineTop(line) + item.lineBottom(line)) / 2
@@ -1041,7 +1057,8 @@ class ReaderView(ctx: Context) : View(ctx) {
         }
         val h = dragHeight(top, y)
         val bottom = minOf(top + h * s.content.height(), s.content.bottom)
-        val rect = RectF(s.content.left, top, s.content.right, bottom)
+        val rect = if (r != null) RectF(r.rect.left, top, r.rect.right, bottom)
+        else RectF(if (insertMarkR > insertMarkL) insertMarkL else s.content.left, top, if (insertMarkR > insertMarkL) insertMarkR else s.content.right, bottom)
         overlay.style = Paint.Style.FILL
         overlay.color = (colors.faint and 0x00FFFFFF) or 0x55000000
         c.drawRect(rect, overlay)
@@ -1261,7 +1278,7 @@ class ReaderView(ctx: Context) : View(ctx) {
         // plus the margin before it; everything else goes forward.
         val c = spec?.content
         val l = c?.left ?: 0f
-        val r = c?.right ?: width.toFloat()
+        val r = spec?.fullRight ?: width.toFloat()
         val zone = (r - l) * 0.35f
         val backZone = if (rtl) x > r - zone else x < l + zone
         if (backZone) prev() else next()
@@ -1273,7 +1290,7 @@ class ReaderView(ctx: Context) : View(ctx) {
         val page = currentPage() ?: return
         val p = toPage(fDownX, fDownY)
         val e = engine ?: return
-        val item = page.items.firstOrNull { p.y >= it.rect.top && p.y <= it.rect.bottom }
+        val item = page.items.firstOrNull { p.y >= it.rect.top && p.y <= it.rect.bottom && p.x >= it.colLeft && p.x <= it.colRight }
         when {
             item is SpaceItem -> {
                 fLong = true
@@ -1404,7 +1421,9 @@ class ReaderView(ctx: Context) : View(ctx) {
             hiRes = null; return
         }
         val page = currentPage() ?: return
-        val slice = page.items.filterIsInstance<PdfSliceItem>().firstOrNull() ?: return
+        val centre = toPage(width / 2f, height / 2f)
+        val slices = page.items.filterIsInstance<PdfSliceItem>()
+        val slice = slices.firstOrNull { centre.x >= it.colLeft && centre.x <= it.colRight } ?: slices.firstOrNull() ?: return
         val cache = pdfCache ?: return
         val pr = slice.pageRect
         val m = Matrix()
@@ -1416,6 +1435,7 @@ class ReaderView(ctx: Context) : View(ctx) {
         val key = zoomKey()
         cache.renderZoomed(slice.page, m, width, height, renderer.eink) { bmp ->
             hiRes = bmp
+            hiResPage = slice.page
             hiResKey = key
             invalidate()
         }

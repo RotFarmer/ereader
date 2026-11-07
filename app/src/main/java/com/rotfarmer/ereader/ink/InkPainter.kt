@@ -22,9 +22,10 @@ class Placement(val ox: Float, val oy: Float, val unit: Float, val clip: RectF?)
 
 object Anchoring {
     /** Calls [fn] for every stroke visible on [page], with where to draw it. */
+    @Suppress("UNUSED_PARAMETER")
     fun forEachStroke(page: Page, ink: InkStore, content: RectF, viewW: Int, fn: (InkStroke, Placement) -> Unit) {
-        val cw = content.width()
         for (item in page.items) {
+            val colW = item.colRight - item.colLeft
             when (item) {
                 is TextItem -> {
                     val list = ink.get(Anchor.BLOCK, item.block.toLong())
@@ -35,20 +36,20 @@ object Anchoring {
                         val off = s.anchor.a2
                         if (off < s0 || off >= s1) continue
                         val line = item.layout.getLineForOffset(off - item.pieceStart).coerceIn(item.lineStart, item.lineEnd - 1)
-                        fn(s, Placement(content.left, item.lineTop(line), cw, null))
+                        fn(s, Placement(item.colLeft, item.lineTop(line), colW, null))
                     }
                 }
                 is ImageItem -> for (s in ink.get(Anchor.BLOCK, item.block.toLong())) {
                     fn(s, Placement(item.rect.left, item.rect.top, item.rect.width(), null))
                 }
                 is RuleItem -> for (s in ink.get(Anchor.BLOCK, item.block.toLong())) {
-                    fn(s, Placement(content.left, item.rect.top, cw, null))
+                    fn(s, Placement(item.colLeft, item.rect.top, colW, null))
                 }
                 is SpaceItem -> for (s in ink.get(Anchor.SPACE, item.space.id)) {
                     if (s.anchor.a2 == item.part) fn(s, Placement(item.rect.left, item.rect.top, item.rect.width(), null))
                 }
                 is PdfSliceItem -> {
-                    val clip = if (item.isWhole) null else RectF(0f, item.rect.top, viewW.toFloat(), item.rect.bottom)
+                    val clip = if (item.isWhole) null else RectF(item.colLeft, item.rect.top, item.colRight, item.rect.bottom)
                     for (s in ink.get(Anchor.PDF, item.page.toLong())) {
                         fn(s, Placement(item.pageRect.left, item.pageRect.top, item.pageRect.width(), clip))
                     }
@@ -57,16 +58,23 @@ object Anchoring {
         }
     }
 
-    /** The page item nearest to a point (vertically). */
-    fun itemAt(page: Page, y: Float): PageItem? {
+    /** The page item nearest to a point: same column first, then the nearest vertically. */
+    fun itemAt(page: Page, x: Float, y: Float): PageItem? {
         var best: PageItem? = null
         var bestD = Float.MAX_VALUE
         for (it in page.items) {
-            val d = when {
+            val dx = when {
+                x < it.colLeft -> it.colLeft - x
+                x > it.colRight -> x - it.colRight
+                else -> 0f
+            }
+            val dy = when {
                 y < it.rect.top -> it.rect.top - y
                 y > it.rect.bottom -> y - it.rect.bottom
                 else -> 0f
             }
+            // Strongly prefer the column the point is in.
+            val d = dy + dx * 10f
             if (d < bestD) {
                 bestD = d; best = it
             }
@@ -75,20 +83,20 @@ object Anchoring {
     }
 
     /** What a new stroke centred at (x, y) should be attached to. */
+    @Suppress("UNUSED_PARAMETER")
     fun anchorAt(page: Page, x: Float, y: Float, content: RectF, viewW: Int): Pair<Anchor, Placement>? {
-        val cw = content.width()
-        return when (val item = itemAt(page, y)) {
+        return when (val item = itemAt(page, x, y)) {
             is TextItem -> {
                 val line = item.lineAt(y)
                 val off = item.pieceStart + item.layout.getLineStart(line)
-                Anchor(Anchor.BLOCK, item.block.toLong(), off) to Placement(content.left, item.lineTop(line), cw, null)
+                Anchor(Anchor.BLOCK, item.block.toLong(), off) to Placement(item.colLeft, item.lineTop(line), item.colRight - item.colLeft, null)
             }
             is ImageItem -> Anchor(Anchor.BLOCK, item.block.toLong(), 0) to Placement(item.rect.left, item.rect.top, item.rect.width(), null)
-            is RuleItem -> Anchor(Anchor.BLOCK, item.block.toLong(), 0) to Placement(content.left, item.rect.top, cw, null)
+            is RuleItem -> Anchor(Anchor.BLOCK, item.block.toLong(), 0) to Placement(item.colLeft, item.rect.top, item.colRight - item.colLeft, null)
             is SpaceItem -> Anchor(Anchor.SPACE, item.space.id, item.part) to Placement(item.rect.left, item.rect.top, item.rect.width(), null)
             is PdfSliceItem -> Anchor(Anchor.PDF, item.page.toLong(), 0) to Placement(
                 item.pageRect.left, item.pageRect.top, item.pageRect.width(),
-                if (item.isWhole) null else RectF(0f, item.rect.top, viewW.toFloat(), item.rect.bottom)
+                if (item.isWhole) null else RectF(item.colLeft, item.rect.top, item.colRight, item.rect.bottom)
             )
             null -> null
         }

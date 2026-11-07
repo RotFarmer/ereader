@@ -136,6 +136,9 @@ class ReaderActivity : Activity(), ReaderView.Listener, PenToolbar.Callbacks {
 
     private var engineGen = 0
     private var pendingLoc: Locator? = null
+    /** Where the reader actually is; kept across re-layouts (rotation, font size) so they don't drift. */
+    private var anchorLoc: Locator? = null
+    private var relayout = false
     private var pendingLocate: (() -> Unit)? = null
     private var lastPos: PagePos? = null
     private var pageShownAt = 0L
@@ -356,25 +359,48 @@ class ReaderActivity : Activity(), ReaderView.Listener, PenToolbar.Callbacks {
             "fraktur" -> 1.12f; "gothic" -> 1.06f; else -> 1f
         }
         val px = TypedValue.applyDimension(TypedValue.COMPLEX_UNIT_SP, settings.fontSizeSp() * sizeScale, resources.displayMetrics)
-        val content = if (s.pdf != null) {
+        val density = resources.displayMetrics.density
+        // Landscape on a wide enough screen: two pages side by side, like an open book.
+        val spread = settings.twoPages && w > h * 1.15f && w / density >= 560f
+        val m = dp(Settings.MARGINS_DP[settings.margins.coerceIn(0, 2)]).toFloat()
+        val area = if (s.pdf != null) {
             RectF((dp(6) + cut.left).toFloat(), max(dp(28), cut.top + dp(6)).toFloat(), (w - dp(6) - cut.right).toFloat(), (h - dp(30)).toFloat())
         } else {
-            var m = dp(Settings.MARGINS_DP[settings.margins.coerceIn(0, 2)]).toFloat()
-            val maxWidth = px * 40f
-            if (w - 2 * m > maxWidth) m = (w - maxWidth) / 2f
             RectF(m + cut.left, max(dp(46), cut.top + dp(30)).toFloat(), w - m - cut.right, (h - dp(42)).toFloat())
         }
         // Keep text and pages clear of the pen toolbar while it's showing.
         if (settings.toolbarVisible) {
             val reserve = dp(66).toFloat()
-            if (settings.toolbarRight) content.right = minOf(content.right, w - reserve)
-            else content.left = maxOf(content.left, reserve)
+            if (settings.toolbarRight) area.right = minOf(area.right, w - reserve)
+            else area.left = maxOf(area.left, reserve)
+        }
+        var columns = 1
+        var gap = 0f
+        val content: RectF
+        if (spread) {
+            columns = 2
+            gap = if (s.pdf != null) dp(4).toFloat() else maxOf(m * 2, dp(40).toFloat())
+            var cw = (area.width() - gap) / 2
+            var left = area.left
+            val maxCol = px * 36f
+            if (s.pdf == null && cw > maxCol) {
+                left += cw - maxCol; cw = maxCol
+            }
+            content = RectF(left, area.top, left + cw, area.bottom)
+        } else {
+            content = area
+            val maxWidth = px * 40f
+            if (s.pdf == null && content.width() > maxWidth) {
+                val extra = (content.width() - maxWidth) / 2
+                content.left += extra; content.right -= extra
+            }
         }
         return LayoutSpec(
-            width = w, height = h, density = resources.displayMetrics.density,
+            width = w, height = h, density = density,
             typeface = Fonts.get(this, fontKey), textSizePx = px, lineSpacing = settings.lineSpacingMult(),
             content = content, justify = settings.justify, indent = settings.indent,
             textColor = ReaderColors(settings.dark).text,
+            columns = columns, columnGap = gap,
         )
     }
 
@@ -385,7 +411,7 @@ class ReaderActivity : Activity(), ReaderView.Listener, PenToolbar.Callbacks {
         val w = view.width
         val h = view.height
         if (w == 0 || h == 0) return
-        val loc = pendingLoc ?: currentLoc() ?: Locator(0, 0)
+        val loc = pendingLoc ?: anchorLoc ?: currentLoc() ?: Locator(0, 0)
         val spec = makeSpec(w, h, s)
         val pdf = s.pdf
         val engine: Engine = if (pdf != null) PdfEngine(pdf, spec, s.ann.spaces) else {
@@ -401,7 +427,10 @@ class ReaderActivity : Activity(), ReaderView.Listener, PenToolbar.Callbacks {
             loading?.let { root.removeView(it) }
             loading = null
             pendingLoc = null
+            anchorLoc = loc
+            relayout = true
             view.setEngine(engine, spec, pos)
+            relayout = false
             engine.startBackground(pos.ch) {
                 if (gen == engineGen) {
                     updateFooter(); updateBottomBar()
@@ -437,6 +466,7 @@ class ReaderActivity : Activity(), ReaderView.Listener, PenToolbar.Callbacks {
         lastPos = pos
         pageShownAt = now
         lastPageChars = pageChars(page)
+        if (!relayout) anchorLoc = page.start
         view.header = if (s.flow != null) s.flow?.sectionTitle(page.start) ?: s.book.title else s.book.title
         updateFooter()
         updateBookmarkState(page)
@@ -1268,6 +1298,9 @@ class ReaderActivity : Activity(), ReaderView.Listener, PenToolbar.Callbacks {
             c.addView(toggleRow(this, "Justify text", null, settings.justify, ui) { settings.justify = it; rebuildEngine() })
             c.addView(toggleRow(this, "Indent paragraphs", "Book-style first-line indents", settings.indent, ui) { settings.indent = it; rebuildEngine() })
         }
+        c.addView(toggleRow(this, "Two pages in landscape", "Side by side, like an open book", settings.twoPages, ui) {
+            settings.twoPages = it; rebuildEngine()
+        })
         c.addView(sectionTitle(this, "E-ink effects", ui))
         c.addView(toggleRow(this, "Paper grain", "Subtle texture of an e-ink screen", settings.paperTexture, ui) {
             settings.paperTexture = it; applyAppearance()

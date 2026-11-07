@@ -51,53 +51,76 @@ class PdfEngine(val pdf: PdfDoc, val spec: LayoutSpec, spaces: List<WritingSpace
         return out
     }
 
-    override fun pageCount(ch: Int) = screens.size
+    /** Screens shown side by side (2 in landscape two-page mode). */
+    private val cols = spec.columns.coerceAtLeast(1)
+
+    private fun spreads() = (screens.size + cols - 1) / cols
+
+    override fun pageCount(ch: Int) = spreads()
 
     override fun page(ch: Int, idx: Int): Page = synchronized(cache) {
-        val i = idx.coerceIn(0, screens.size - 1)
-        cache.getOrPut(i) { buildPage(i) }
+        val i = idx.coerceIn(0, spreads() - 1)
+        cache.getOrPut(i) { buildSpread(i) }
     }
 
-    private fun buildPage(idx: Int): Page {
-        val s = screens[idx]
-        val c = spec.content
+    private fun buildSpread(idx: Int): Page {
         val page = Page(0, idx)
-        page.start = s.start
-        page.end = screens.getOrNull(idx + 1)?.start ?: Locator(pdf.pageCount, 0)
+        val first = idx * cols
+        page.start = screens[first].start
+        page.end = screens.getOrNull(first + cols)?.start ?: Locator(pdf.pageCount, 0)
+        for (k in 0 until cols) {
+            if (first + k < screens.size) addScreen(page, first + k, k)
+        }
+        return page
+    }
+
+    private fun addScreen(page: Page, idx: Int, col: Int) {
+        val s = screens[idx]
+        val left0 = spec.columnLeft(col)
+        val c = RectF(left0, spec.content.top, left0 + spec.content.width(), spec.content.bottom)
+        fun add(item: PageItem) {
+            item.colLeft = c.left
+            item.colRight = c.right
+            page.items += item
+        }
         if (s.blank != null) {
-            page.items += SpaceItem(RectF(c), s.blank, 0)
-            return page
+            add(SpaceItem(RectF(c), s.blank, 0))
+            return
         }
         val size = if (pdf.pageCount > 0) pdf.pageSize(s.page) else android.util.SizeF(612f, 792f)
         val whole = s.y0 <= 0f && s.y1 >= 1f
         val scale = min(c.width() / size.width, c.height() / size.height)
         val pw = size.width * scale
         val ph = size.height * scale
-        val left = c.left + (c.width() - pw) / 2
+        // In two-page mode the pages meet in the middle, like an open book.
+        val left = when {
+            cols == 2 && col == 0 -> c.right - pw
+            cols == 2 && col == 1 -> c.left
+            else -> c.left + (c.width() - pw) / 2
+        }
         val top = if (whole) c.top + (c.height() - ph) / 2 else c.top - s.y0 * ph
         val pageRect = RectF(left, top, left + pw, top + ph)
         val slice = RectF(left, top + s.y0 * ph, left + pw, top + s.y1 * ph)
-        page.items += PdfSliceItem(slice, s.page, s.y0, s.y1, pageRect)
+        add(PdfSliceItem(slice, s.page, s.y0, s.y1, pageRect))
         if (!whole) {
             val space = s.after ?: s.before
             val part = if (s.after != null) 0 else 1
             if (space != null && c.bottom - slice.bottom > 4) {
-                page.items += SpaceItem(RectF(c.left, slice.bottom, c.right, c.bottom), space, part)
+                add(SpaceItem(RectF(c.left, slice.bottom, c.right, c.bottom), space, part))
             }
         }
-        return page
     }
 
     override fun position(loc: Locator): PagePos {
         val list = screens
         var idx = 0
         for (i in list.indices) if (list[i].start <= loc) idx = i else break
-        return PagePos(0, idx)
+        return PagePos(0, idx / cols)
     }
 
-    override fun totalPages() = screens.size
+    override fun totalPages() = spreads()
     override fun globalIndex(pos: PagePos) = pos.idx
-    override fun posForGlobal(g: Int) = PagePos(0, g.coerceIn(0, screens.size - 1))
+    override fun posForGlobal(g: Int) = PagePos(0, g.coerceIn(0, spreads() - 1))
 
     override fun setSpaces(spaces: List<WritingSpace>, changedBlock: Int) {
         val s = build(spaces)

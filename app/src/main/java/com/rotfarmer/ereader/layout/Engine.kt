@@ -16,12 +16,19 @@ class LayoutSpec(
     val typeface: Typeface,
     val textSizePx: Float,
     val lineSpacing: Float,
-    /** Where text and pictures go; header and footer live outside it. */
+    /** Where text and pictures go (the first column, in two-page mode); header and footer live outside it. */
     val content: RectF,
     val justify: Boolean,
     val indent: Boolean,
     val textColor: Int,
-)
+    /** 2 in landscape two-page mode: pages are laid out as two side-by-side columns per screen. */
+    val columns: Int = 1,
+    val columnGap: Float = 0f,
+) {
+    fun columnLeft(col: Int): Float = content.left + col * (content.width() + columnGap)
+    /** Right edge of the last column. */
+    val fullRight: Float get() = columnLeft(columns - 1) + content.width()
+}
 
 class Page(val chapter: Int, val index: Int) {
     val items = ArrayList<PageItem>(8)
@@ -29,7 +36,11 @@ class Page(val chapter: Int, val index: Int) {
     var end = Locator(0, 0)
 }
 
-sealed class PageItem(val rect: RectF)
+sealed class PageItem(val rect: RectF) {
+    /** The column (page half) this item sits in; set by the engine. */
+    var colLeft = 0f
+    var colRight = 0f
+}
 
 class TextItem(
     rect: RectF,

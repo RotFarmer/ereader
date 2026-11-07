@@ -170,12 +170,31 @@ class FlowEngine(
         var page = Page(chapter, 0)
         var y = 0f
         var lastKind = -1
+        /** Which column of the screen we are filling (two-page mode has two). */
+        var col = 0
+        var colItems = 0
 
+        val left: Float get() = spec.columnLeft(col)
+
+        fun add(item: PageItem) {
+            item.colLeft = left
+            item.colRight = left + cw
+            page.items += item
+            colItems++
+        }
+
+        /** Moves on to the next column, or the next screen. */
         fun newPage() {
-            if (page.items.isEmpty()) return
+            if (col == 0 && page.items.isEmpty()) return
+            if (col + 1 < spec.columns) {
+                col++; y = 0f; colItems = 0
+                return
+            }
             out.add(page)
             page = Page(chapter, out.size)
             y = 0f
+            col = 0
+            colItems = 0
         }
 
         fun finish(): List<Page> {
@@ -227,7 +246,7 @@ class FlowEngine(
                     spaces.filter { it.loc.offset == 0 }.forEach { placeSpace(b, it) }
                     val h = em * 2f
                     if (b.y + h > ch) b.newPage()
-                    b.page.items += RuleItem(RectF(content.left, content.top + b.y, content.right, content.top + b.y + h), bi)
+                    b.add(RuleItem(RectF(b.left, content.top + b.y, b.left + cw, content.top + b.y + h), bi))
                     b.y += h
                     spaces.filter { it.loc.offset != 0 }.forEach { placeSpace(b, it) }
                     b.lastKind = -1
@@ -240,7 +259,7 @@ class FlowEngine(
     private fun placeSpace(b: Builder, s: WritingSpace) {
         val h = (s.height.coerceIn(0.05f, 1f) * ch)
         if (b.y > 0 && b.y + h > ch + 1) b.newPage()
-        b.page.items += SpaceItem(RectF(content.left, content.top + b.y, content.right, content.top + b.y + h), s, 0)
+        b.add(SpaceItem(RectF(b.left, content.top + b.y, b.left + cw, content.top + b.y + h), s, 0))
         b.y += h
     }
 
@@ -264,8 +283,8 @@ class FlowEngine(
         }
         val gap = if (b.y > 0) em * 0.6f else 0f
         if (b.y + gap + h > ch) b.newPage() else b.y += gap
-        val left = content.left + (cw - w) / 2
-        b.page.items += ImageItem(RectF(left, content.top + b.y, left + w, content.top + b.y + h), bi, block.path)
+        val left = b.left + (cw - w) / 2
+        b.add(ImageItem(RectF(left, content.top + b.y, left + w, content.top + b.y + h), bi, block.path))
         b.y += h + em * 0.4f
     }
 
@@ -347,19 +366,19 @@ class FlowEngine(
             var end = line
             while (end < lineCount && layout.getLineBottom(end) - top <= avail + 0.5f) end++
             if (end == line) {
-                if (b.page.items.isEmpty()) end = line + 1 else {
+                if (b.colItems == 0) end = line + 1 else {
                     b.newPage(); continue
                 }
             }
             // Avoid a lone first line at the bottom of a page.
-            if (line == 0 && end == 1 && lineCount > 2 && b.page.items.isNotEmpty() && block.kind == TextBlock.BODY) {
+            if (line == 0 && end == 1 && lineCount > 2 && b.colItems > 0 && block.kind == TextBlock.BODY) {
                 b.newPage(); continue
             }
             // Avoid a lone last line at the top of the next page.
             if (end == lineCount - 1 && end - line > 2) end--
             val h = layout.getLineBottom(end - 1) - top
-            val x = content.left + leftIndent
-            b.page.items += TextItem(RectF(x, content.top + b.y, x + width, content.top + b.y + h), bi, from, layout, line, end)
+            val x = b.left + leftIndent
+            b.add(TextItem(RectF(x, content.top + b.y, x + width, content.top + b.y + h), bi, from, layout, line, end))
             b.y += h
             line = end
             if (line < lineCount) b.newPage()
