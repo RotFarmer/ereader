@@ -37,7 +37,10 @@ class PageRenderer(private val density: Float) {
                 is TextItem -> drawText(c, item)
                 is ImageItem -> drawImage(c, item)
                 is RuleItem -> drawRule(c, item)
-                is SpaceItem -> drawSpace(c, item.rect, item.space.paper, item.space.kind == WritingSpace.PDF_BLANK)
+                is SpaceItem -> {
+                    drawSpace(c, item.rect, item.space.paper, item.space.kind == WritingSpace.PDF_BLANK)
+                    if (item.space.kind == WritingSpace.FLOW) drawGrip(c, item.rect)
+                }
                 is PdfSliceItem -> drawPdf(c, item)
             }
         }
@@ -105,6 +108,18 @@ class PageRenderer(private val density: Float) {
             if (item.y1 < 1f) c.drawLine(item.rect.left, item.rect.bottom, item.rect.right, item.rect.bottom, linePaint)
             linePaint.pathEffect = null
         }
+    }
+
+    /** A small handle on the bottom edge: drag it to resize the space. */
+    private fun drawGrip(c: Canvas, r: RectF) {
+        linePaint.style = Paint.Style.FILL
+        linePaint.color = colors.muted
+        val w = 18 * density
+        val y = r.bottom - 7 * density
+        val h = 1.6f * density
+        c.drawRoundRect(RectF(r.centerX() - w, y - 2.5f * density - h, r.centerX() + w, y - 2.5f * density), h, h, linePaint)
+        c.drawRoundRect(RectF(r.centerX() - w, y, r.centerX() + w, y + h), h, h, linePaint)
+        linePaint.style = Paint.Style.STROKE
     }
 
     fun drawSpace(c: Canvas, r: RectF, paper: Int, fullPage: Boolean) {

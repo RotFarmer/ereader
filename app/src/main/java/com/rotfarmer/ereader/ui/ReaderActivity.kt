@@ -553,7 +553,7 @@ class ReaderActivity : Activity(), ReaderView.Listener, PenToolbar.Callbacks {
             view.invalidateContent()
         })
         if (space.kind == WritingSpace.FLOW) {
-            c.addView(sectionTitle(this, "Height", ui))
+            c.addView(sectionTitle(this, "Height (or drag the bottom edge)", ui))
             val sizes = floatArrayOf(0.25f, 0.5f, 0.75f, 1f)
             val cur = sizes.indices.minByOrNull { kotlin.math.abs(sizes[it] - space.height) } ?: 1
             c.addView(Segmented(this, listOf("¼ page", "½ page", "¾ page", "Full"), cur, ui) {
@@ -611,12 +611,31 @@ class ReaderActivity : Activity(), ReaderView.Listener, PenToolbar.Callbacks {
             }
         }
         c.addView(row)
-        c.addView(label(this, "Long-press a writing space to change its paper or remove it.", ui, 12f, ui.muted).apply { setPadding(0, dp(8), 0, 0) })
+        if (target is InsertTarget.Flow) {
+            c.addView(label(this, "Tip: press and drag down instead of tapping to size it by hand. Drag a space's bottom edge to resize it later.", ui, 12f, ui.muted).apply { setPadding(0, dp(8), 0, 0) })
+        }
+        c.addView(label(this, "Long-press a writing space to change its paper or remove it.", ui, 12f, ui.muted).apply { setPadding(0, dp(4), 0, 0) })
         popups.show(c, anchor, below = true, onDismiss = {
             view.clearInsertMark()
             view.armedInsert = false
             toolbar?.insertArmed = false
         })
+    }
+
+    override fun onInsertSpaceSized(loc: Locator, height: Float) {
+        val s = session ?: return
+        popups.dismissAll()
+        val sp = WritingSpace(Ids.next(), s.book.id, WritingSpace.FLOW, loc, height, WritingSpace.PAPER_DOTS, System.currentTimeMillis())
+        s.addSpace(sp)
+        spacesChanged(loc.block)
+    }
+
+    override fun onSpaceResized(space: WritingSpace, height: Float) {
+        val s = session ?: return
+        if (kotlin.math.abs(space.height - height) < 0.005f) return
+        space.height = height
+        s.updateSpace(space)
+        spacesChanged(space.loc.block)
     }
 
     private fun spacesChanged(block: Int) {

@@ -228,7 +228,7 @@ class FlowEngine(
     }
 
     private fun placeSpace(b: Builder, s: WritingSpace) {
-        val h = (s.height.coerceIn(0.1f, 1f) * ch)
+        val h = (s.height.coerceIn(0.05f, 1f) * ch)
         if (b.y > 0 && b.y + h > ch + 1) b.newPage()
         b.page.items += SpaceItem(RectF(content.left, content.top + b.y, content.right, content.top + b.y + h), s, 0)
         b.y += h

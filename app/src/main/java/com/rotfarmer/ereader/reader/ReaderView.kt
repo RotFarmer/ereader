@@ -63,6 +63,11 @@ import kotlin.math.roundToInt
 @SuppressLint("ViewConstructor")
 class ReaderView(ctx: Context) : View(ctx) {
 
+    companion object {
+        /** Smallest writing space, as a fraction of a page. */
+        const val MIN_SPACE = 0.06f
+    }
+
     interface Listener {
         fun onPageShown(pos: PagePos)
         fun onToggleChrome()
@@ -74,6 +79,10 @@ class ReaderView(ctx: Context) : View(ctx) {
         fun onRegion(page: Int, region: RectF, anchor: RectF)
         fun onSpaceLongPress(space: WritingSpace, anchor: RectF)
         fun onInsertSpace(target: InsertTarget, anchor: RectF)
+        /** Press-and-drag with the insert tool: add a space of [height] (fraction of a page) at [loc]. */
+        fun onInsertSpaceSized(loc: Locator, height: Float)
+        /** The bottom edge of a writing space was dragged to a new [height]. */
+        fun onSpaceResized(space: WritingSpace, height: Float)
         fun onStrokeAdded(s: InkStroke)
         fun onStrokesErased(list: List<InkStroke>, highlights: List<Highlight>)
         fun onSmartHighlight(start: Locator, end: Locator, color: Int)
@@ -168,6 +177,13 @@ class ReaderView(ctx: Context) : View(ctx) {
     private var locateRegion: RectF? = null
     private var locateUntil = 0L
     private var insertMarkY = -1f
+    // Sizing writing spaces by hand.
+    private var insertTarget: Locator? = null
+    private var insertDownY = 0f
+    private var insertCurY = 0f
+    private var insertDragging = false
+    private var resizing: SpaceItem? = null
+    private var resizeY = 0f
 
     // ------------------------------------------------------------- input
     private val slop = ViewConfiguration.get(ctx).scaledTouchSlop.toFloat()
@@ -382,7 +398,8 @@ class ReaderView(ctx: Context) : View(ctx) {
         if (liveCount > 0 && !penErasing && !penInsert) {
             inkPainter.drawLive(canvas, live, liveCount, tool, toolColor, dp(toolWidthDp))
         }
-        if (insertMarkY >= 0) drawInsertMark(canvas)
+        if (insertMarkY >= 0 && !insertDragging) drawInsertMark(canvas)
+        drawSizing(canvas)
         drawChrome(canvas)
         drawHover(canvas)
         drawFlash(canvas)
@@ -502,7 +519,7 @@ class ReaderView(ctx: Context) : View(ctx) {
             c.drawPath(path, overlay)
         }
         if (armedInsert) {
-            val t = "Tap where you want to add writing space"
+            val t = "Tap to add writing space, or press and drag down to size it"
             textPaint.color = colors.text
             c.drawText(t, (width - textPaint.measureText(t)) / 2f, s.content.top - dp(14f) + dp(2f), textPaint)
         }
@@ -740,7 +757,21 @@ class ReaderView(ctx: Context) : View(ctx) {
         erasedHl.clear()
         penInsert = armedInsert
         if (penInsert) {
-            addPoint(e.getX(idx), e.getY(idx), 1f); return
+            addPoint(e.getX(idx), e.getY(idx), 1f)
+            insertDragging = false
+            insertTarget = null
+            if (engine?.isFixed == false) {
+                val page = currentPage()
+                val t = page?.let { flowInsertTarget(it, toPage(e.getX(idx), e.getY(idx))) }
+                if (t != null) {
+                    insertTarget = t.first
+                    insertMarkY = t.second
+                    insertDownY = t.second
+                    insertCurY = t.second
+                }
+            }
+            invalidate()
+            return
         }
         val tt = e.getToolType(idx)
         penErasing = tool == Tools.ERASER || tt == MotionEvent.TOOL_TYPE_ERASER || samsungButton ||
@@ -756,7 +787,14 @@ class ReaderView(ctx: Context) : View(ctx) {
         val i = e.findPointerIndex(penPointer)
         if (i < 0) return
         lastStylusTime = SystemClock.uptimeMillis()
-        if (penInsert) return
+        if (penInsert) {
+            if (insertTarget != null) {
+                insertCurY = toPage(e.getX(i), e.getY(i)).y
+                if (insertCurY - insertDownY > slop * 2) insertDragging = true
+                invalidate()
+            }
+            return
+        }
         if (!penErasing && !penIsFinger && liveCount <= 3 &&
             (samsungButton || (e.buttonState and MotionEvent.BUTTON_STYLUS_PRIMARY) != 0)
         ) {
@@ -798,7 +836,13 @@ class ReaderView(ctx: Context) : View(ctx) {
             }
         }
         when {
-            penInsert -> if (liveCount > 0) insertAt(live[0], live[1])
+            penInsert -> {
+                val t = insertTarget
+                if (insertDragging && t != null) {
+                    insertMarkY = -1f
+                    listener?.onInsertSpaceSized(t, dragHeight(insertDownY, insertCurY))
+                } else if (liveCount > 0) insertAt(live[0], live[1])
+            }
             penErasing -> if (erasedNow.isNotEmpty() || erasedHl.isNotEmpty()) {
                 listener?.onStrokesErased(ArrayList(erasedNow), ArrayList(erasedHl))
             }
@@ -815,6 +859,8 @@ class ReaderView(ctx: Context) : View(ctx) {
     }
 
     private fun resetPen() {
+        insertDragging = false
+        insertTarget = null
         penPointer = -1
         penErasing = false
         penInsert = false
@@ -916,33 +962,86 @@ class ReaderView(ctx: Context) : View(ctx) {
             invalidate()
             return
         }
-        val target: Locator = when (item) {
+        val (target, markY) = flowInsertTarget(page, p) ?: return
+        insertMarkY = markY
+        invalidate()
+        listener?.onInsertSpace(InsertTarget.Flow(target), anchor)
+    }
+
+    /** Where a writing space tapped at page point [p] goes, and the y of that spot. */
+    private fun flowInsertTarget(page: Page, p: PointF): Pair<Locator, Float>? {
+        return when (val item = Anchoring.itemAt(page, p.y) ?: return null) {
             is TextItem -> {
                 val line = item.lineAt(p.y)
                 val mid = (item.lineTop(line) + item.lineBottom(line)) / 2
-                if (p.y < mid) {
-                    insertMarkY = item.lineTop(line)
-                    Locator(item.block, item.pieceStart + item.layout.getLineStart(line))
-                } else {
-                    insertMarkY = item.lineBottom(line)
-                    Locator(item.block, item.pieceStart + item.layout.getLineEnd(line))
-                }
+                if (p.y < mid) Locator(item.block, item.pieceStart + item.layout.getLineStart(line)) to item.lineTop(line)
+                else Locator(item.block, item.pieceStart + item.layout.getLineEnd(line)) to item.lineBottom(line)
             }
             is ImageItem -> {
                 val before = p.y < item.rect.centerY()
-                insertMarkY = if (before) item.rect.top else item.rect.bottom
-                Locator(item.block, if (before) 0 else 1)
+                Locator(item.block, if (before) 0 else 1) to (if (before) item.rect.top else item.rect.bottom)
             }
-            is RuleItem -> {
-                insertMarkY = item.rect.bottom; Locator(item.block, 1)
-            }
-            is SpaceItem -> {
-                insertMarkY = item.rect.bottom; item.space.loc
-            }
-            is PdfSliceItem -> return
+            is RuleItem -> Locator(item.block, 1) to item.rect.bottom
+            is SpaceItem -> item.space.loc to item.rect.bottom
+            is PdfSliceItem -> null
         }
-        invalidate()
-        listener?.onInsertSpace(InsertTarget.Flow(target), anchor)
+    }
+
+    /** Height (fraction of a page) for a space dragged from [top] to [y]; the very bottom means a full page. */
+    private fun dragHeight(top: Float, y: Float): Float {
+        val s = spec ?: return 0.5f
+        if (y >= s.content.bottom + dp(6f)) return 1f
+        return ((y - top) / s.content.height()).coerceIn(MIN_SPACE, 1f)
+    }
+
+    /** A flow writing space whose bottom edge (grip) is under the finger. */
+    private fun spaceEdgeAt(x: Float, y: Float): SpaceItem? {
+        if (engine?.isFixed != false) return null
+        val page = currentPage() ?: return null
+        var best: SpaceItem? = null
+        var bestD = dp(26f)
+        for (it in page.items) {
+            if (it !is SpaceItem || it.space.kind != WritingSpace.FLOW) continue
+            if (x < it.rect.left - dp(8f) || x > it.rect.right + dp(8f)) continue
+            val d = abs(y - it.rect.bottom)
+            if (d < bestD) {
+                bestD = d; best = it
+            }
+        }
+        return best
+    }
+
+    private fun drawSizing(c: Canvas) {
+        val s = spec ?: return
+        val top: Float
+        val y: Float
+        val r = resizing
+        when {
+            r != null -> {
+                top = r.rect.top; y = resizeY
+            }
+            penInsert && insertDragging -> {
+                top = insertDownY; y = insertCurY
+            }
+            else -> return
+        }
+        val h = dragHeight(top, y)
+        val bottom = minOf(top + h * s.content.height(), s.content.bottom)
+        val rect = RectF(s.content.left, top, s.content.right, bottom)
+        overlay.style = Paint.Style.FILL
+        overlay.color = colors.selection
+        c.drawRect(rect, overlay)
+        overlay.style = Paint.Style.STROKE
+        overlay.strokeWidth = dp(2f)
+        overlay.color = colors.text
+        overlay.pathEffect = DashPathEffect(floatArrayOf(dp(8f), dp(5f)), 0f)
+        c.drawRect(rect, overlay)
+        overlay.pathEffect = null
+        val label = if (h >= 0.999f) "Full page" else "${(h * 100).roundToInt()}% of a page"
+        textPaint.color = colors.text
+        val tw = textPaint.measureText(label)
+        val ly = (bottom - dp(10f)).coerceAtLeast(top + dp(18f))
+        c.drawText(label, rect.centerX() - tw / 2, ly, textPaint)
     }
 
     // ----------------------------------------------------------------- fingers
@@ -954,6 +1053,9 @@ class ReaderView(ctx: Context) : View(ctx) {
         removeCallbacks(longPress)
         fActive = false
         dragHandle = 0
+        if (resizing != null) {
+            resizing = null; invalidate()
+        }
     }
 
     private fun finger(e: MotionEvent, act: Int): Boolean {
@@ -965,6 +1067,16 @@ class ReaderView(ctx: Context) : View(ctx) {
                 if (fIgnore) return true
                 dragHandle = hitHandle(e.x, e.y)
                 if (dragHandle != 0) return true
+                if (armedInsert) {
+                    startPen(e, 0, false, finger = true)
+                    return true
+                }
+                spaceEdgeAt(e.x, e.y)?.let {
+                    resizing = it
+                    resizeY = it.rect.bottom
+                    invalidate()
+                    return true
+                }
                 if (fingerDraw) {
                     startPen(e, 0, false, finger = true)
                     return true
@@ -1000,6 +1112,12 @@ class ReaderView(ctx: Context) : View(ctx) {
                     fMoved = true
                     removeCallbacks(longPress)
                 }
+                if (resizing != null) {
+                    if (fMoved) {
+                        resizeY = e.y; invalidate()
+                    }
+                    return true
+                }
                 if (dragHandle != 0) {
                     dragTo(e.x, e.y); return true
                 }
@@ -1029,6 +1147,18 @@ class ReaderView(ctx: Context) : View(ctx) {
                 if (!fActive) return true
                 fActive = false
                 if (fIgnore) return true
+                resizing?.let { sp ->
+                    resizing = null
+                    invalidate()
+                    val dx = e.x - fDownX
+                    val dy = e.y - fDownY
+                    when {
+                        abs(dy) > slop -> listener?.onSpaceResized(sp.space, dragHeight(sp.rect.top, e.y))
+                        abs(dx) > dp(40f) -> swipe(dx)
+                        !fMoved -> tap(e.x, e.y)
+                    }
+                    return true
+                }
                 if (dragHandle != 0) {
                     dragHandle = 0
                     finishSelectionDrag()
