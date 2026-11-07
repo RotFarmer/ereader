@@ -1008,6 +1008,9 @@ class ReaderView(ctx: Context) : View(ctx) {
                         if (steps != 0) listener?.onFontPinch(steps)
                     }
                     pinchScale = 1f
+                    // Keep panning smooth with the finger that stays down.
+                    val keep = if (e.actionIndex == 0) 1 else 0
+                    fLastX = e.getX(keep); fLastY = e.getY(keep)
                 }
             }
             MotionEvent.ACTION_UP -> {
