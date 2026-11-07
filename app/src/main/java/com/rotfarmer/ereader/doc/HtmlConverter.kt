@@ -6,11 +6,11 @@ import android.text.Spanned
 import android.text.SpannedString
 import android.text.style.RelativeSizeSpan
 import android.text.style.StrikethroughSpan
-import android.text.style.StyleSpan
 import android.text.style.SubscriptSpan
 import android.text.style.SuperscriptSpan
 import android.text.style.TypefaceSpan
 import android.text.style.UnderlineSpan
+import com.rotfarmer.ereader.render.EmphasisSpan
 import com.rotfarmer.ereader.data.Locator
 import org.jsoup.nodes.Element
 import org.jsoup.nodes.Node
@@ -210,8 +210,8 @@ class HtmlConverter(
         if (end <= start) return
         fun span(o: Any) = sb.setSpan(o, start, end, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
         when (tag) {
-            "b", "strong", "dt" -> span(StyleSpan(Typeface.BOLD))
-            "i", "em", "cite", "dfn", "var" -> span(StyleSpan(Typeface.ITALIC))
+            "b", "strong", "dt" -> span(EmphasisSpan(Typeface.BOLD))
+            "i", "em", "cite", "dfn", "var" -> span(EmphasisSpan(Typeface.ITALIC))
             "u", "ins" -> span(UnderlineSpan())
             "s", "strike", "del" -> span(StrikethroughSpan())
             "sup" -> {
@@ -233,10 +233,10 @@ class HtmlConverter(
         }
         if (props.isEmpty()) return
         when (props["font-style"]) {
-            "italic", "oblique" -> span(StyleSpan(Typeface.ITALIC))
+            "italic", "oblique" -> span(EmphasisSpan(Typeface.ITALIC))
         }
         when (props["font-weight"]) {
-            "bold", "bolder", "600", "700", "800", "900" -> span(StyleSpan(Typeface.BOLD))
+            "bold", "bolder", "600", "700", "800", "900" -> span(EmphasisSpan(Typeface.BOLD))
         }
         val deco = props["text-decoration"] ?: props["text-decoration-line"]
         if (deco != null) {

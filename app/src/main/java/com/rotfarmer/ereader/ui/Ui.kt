@@ -188,7 +188,7 @@ fun label(ctx: Context, text: String, c: UiColors, size: Float = 14f, color: Int
         textSize = size
         setTextColor(color)
         typeface = when {
-            serif -> Fonts.get(ctx, "literata").let { if (bold) Typeface.create(it, Typeface.BOLD) else it }
+            serif -> Fonts.get(ctx, "literata", if (bold) Typeface.BOLD else Typeface.NORMAL)
             bold -> Typeface.create("sans-serif-medium", Typeface.NORMAL)
             else -> Typeface.create("sans-serif", Typeface.NORMAL)
         }

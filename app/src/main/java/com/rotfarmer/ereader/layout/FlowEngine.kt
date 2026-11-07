@@ -17,6 +17,7 @@ import com.rotfarmer.ereader.doc.FlowDocument
 import com.rotfarmer.ereader.doc.ImageBlock
 import com.rotfarmer.ereader.doc.RuleBlock
 import com.rotfarmer.ereader.doc.TextBlock
+import com.rotfarmer.ereader.render.Fonts
 import kotlin.math.min
 
 /**
@@ -58,7 +59,7 @@ class FlowEngine(
         val scale = when (level) {
             1 -> 1.55f; 2 -> 1.35f; 3 -> 1.2f; 4 -> 1.1f; else -> 1.0f
         }
-        paint(Typeface.create(spec.typeface, Typeface.BOLD), em * scale)
+        paint(Fonts.styled(spec.typeface, Typeface.BOLD), em * scale)
     }
 
     private fun group(list: List<WritingSpace>) = list.filter { it.kind == WritingSpace.FLOW }

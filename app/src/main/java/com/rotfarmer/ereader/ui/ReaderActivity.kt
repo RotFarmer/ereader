@@ -361,6 +361,12 @@ class ReaderActivity : Activity(), ReaderView.Listener, PenToolbar.Callbacks {
             if (w - 2 * m > maxWidth) m = (w - maxWidth) / 2f
             RectF(m + cut.left, max(dp(46), cut.top + dp(30)).toFloat(), w - m - cut.right, (h - dp(42)).toFloat())
         }
+        // Keep text and pages clear of the pen toolbar while it's showing.
+        if (settings.toolbarVisible) {
+            val reserve = dp(66).toFloat()
+            if (settings.toolbarRight) content.right = minOf(content.right, w - reserve)
+            else content.left = maxOf(content.left, reserve)
+        }
         return LayoutSpec(
             width = w, height = h, density = resources.displayMetrics.density,
             typeface = Fonts.get(this, fontKey), textSizePx = px, lineSpacing = settings.lineSpacingMult(),
@@ -707,7 +713,10 @@ class ReaderActivity : Activity(), ReaderView.Listener, PenToolbar.Callbacks {
         }
     }
 
-    override fun onSideChanged() = buildToolbar()
+    override fun onSideChanged() {
+        buildToolbar()
+        rebuildEngine()
+    }
 
     override fun onExpandedChanged() {}
 
@@ -860,6 +869,7 @@ class ReaderActivity : Activity(), ReaderView.Listener, PenToolbar.Callbacks {
                 settings.toolbarVisible = !settings.toolbarVisible
                 active = settings.toolbarVisible
                 buildToolbar()
+                rebuildEngine()
             }
         }
         top.addView(penBtn)

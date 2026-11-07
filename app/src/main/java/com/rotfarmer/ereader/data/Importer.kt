@@ -163,7 +163,7 @@ object Importer {
         c.drawRect(RectF(32f, 32f, w - 32f, h - 32f), line)
         val serif = Fonts.get(ctx, "literata")
         val tp = TextPaint(Paint.ANTI_ALIAS_FLAG).apply {
-            color = 0xFF151515.toInt(); typeface = Typeface.create(serif, Typeface.BOLD); textSize = 46f
+            color = 0xFF151515.toInt(); typeface = Fonts.styled(serif, Typeface.BOLD); textSize = 46f
         }
         var layout = StaticLayout.Builder.obtain(title, 0, title.length, tp, w - 110).setAlignment(Layout.Alignment.ALIGN_CENTER).setLineSpacing(0f, 1.05f).build()
         while (layout.height > 360 && tp.textSize > 24f) {
@@ -179,7 +179,7 @@ object Importer {
         c.drawLine(w / 2f - 60f, ornY, w / 2f + 60f, ornY, line)
         if (author.isNotBlank()) {
             val ap = TextPaint(Paint.ANTI_ALIAS_FLAG).apply {
-                color = 0xFF333333.toInt(); typeface = Typeface.create(serif, Typeface.ITALIC); textSize = 28f
+                color = 0xFF333333.toInt(); typeface = Fonts.styled(serif, Typeface.ITALIC); textSize = 28f
             }
             val al = StaticLayout.Builder.obtain(author, 0, author.length, ap, w - 110).setAlignment(Layout.Alignment.ALIGN_CENTER).build()
             c.save(); c.translate(55f, ornY + 30f); al.draw(c); c.restore()

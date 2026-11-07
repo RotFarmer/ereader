@@ -6,10 +6,10 @@ import android.text.Spanned
 import android.text.SpannedString
 import android.text.style.RelativeSizeSpan
 import android.text.style.StrikethroughSpan
-import android.text.style.StyleSpan
 import android.text.style.SubscriptSpan
 import android.text.style.SuperscriptSpan
 import android.text.style.UnderlineSpan
+import com.rotfarmer.ereader.render.EmphasisSpan
 import android.util.Xml
 import com.rotfarmer.ereader.data.Locator
 import org.xmlpull.v1.XmlPullParser
@@ -306,9 +306,9 @@ object DocxParser {
                                 val end = sb.length
                                 if (end > runStart) {
                                     fun span(o: Any) = sb.setSpan(o, runStart, end, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
-                                    if (bold && italic) span(StyleSpan(Typeface.BOLD_ITALIC))
-                                    else if (bold) span(StyleSpan(Typeface.BOLD))
-                                    else if (italic) span(StyleSpan(Typeface.ITALIC))
+                                    if (bold && italic) span(EmphasisSpan(Typeface.BOLD_ITALIC))
+                                    else if (bold) span(EmphasisSpan(Typeface.BOLD))
+                                    else if (italic) span(EmphasisSpan(Typeface.ITALIC))
                                     if (under) span(UnderlineSpan())
                                     if (strike) span(StrikethroughSpan())
                                     if (vert == "superscript") {

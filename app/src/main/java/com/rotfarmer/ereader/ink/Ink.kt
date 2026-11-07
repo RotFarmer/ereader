@@ -110,14 +110,23 @@ class InkStroke(
     var shape: StrokeShape? = null
 
     val bounds: RectF by lazy {
-        val r = RectF(Float.MAX_VALUE, Float.MAX_VALUE, -Float.MAX_VALUE, -Float.MAX_VALUE)
+        // Plain min/max: RectF.union(x, y) uses if/else-if and misses edges for strokes
+        // that only move up or only move left (they then could never be erased).
+        var minX = Float.MAX_VALUE
+        var minY = Float.MAX_VALUE
+        var maxX = -Float.MAX_VALUE
+        var maxY = -Float.MAX_VALUE
         var i = 0
-        while (i < pts.size) {
-            r.union(pts[i], pts[i + 1])
+        while (i + 1 < pts.size) {
+            val x = pts[i]
+            val y = pts[i + 1]
+            if (x < minX) minX = x
+            if (x > maxX) maxX = x
+            if (y < minY) minY = y
+            if (y > maxY) maxY = y
             i += 3
         }
-        r.inset(-width, -width)
-        r
+        if (minX > maxX) RectF() else RectF(minX - width, minY - width, maxX + width, maxY + width)
     }
 }
 
