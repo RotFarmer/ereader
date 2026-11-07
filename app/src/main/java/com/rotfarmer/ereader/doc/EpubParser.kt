@@ -171,6 +171,7 @@ object EpubParser {
                     }
                 }
             }
+            fillMissingTitles(out)
             return out.build(title, author, src)
         } catch (e: Throwable) {
             src.close()
@@ -178,12 +179,53 @@ object EpubParser {
         }
     }
 
+    /**
+     * Some books' tables of contents have entries with no real title (just "5." — the title is a
+     * picture or missing). Fill those in from the first headings at the start of that chapter.
+     */
+    private fun fillMissingTitles(out: DocBuilder) {
+        for (i in out.toc.indices) {
+            val e = out.toc[i]
+            if (e.title.any { it.isLetter() }) continue
+            val found = ArrayList<String>()
+            var b = e.loc.block
+            val end = minOf(out.blocks.size, e.loc.block + 8)
+            while (b < end && found.size < 2) {
+                val blk = out.blocks[b]
+                if (blk is TextBlock) {
+                    val t = blk.text.toString().replace('\n', ' ').trim()
+                    val headingLike = blk.kind == TextBlock.HEADING ||
+                        (t.length <= 60 && (blk.align == TextBlock.ALIGN_CENTER || blk.align == TextBlock.ALIGN_RIGHT))
+                    if (!headingLike) {
+                        if (found.isNotEmpty() || t.length > 60) break
+                    } else if (t.any { it.isLetter() } && t !in found) found += t.take(60)
+                }
+                b++
+            }
+            if (found.isNotEmpty()) {
+                val num = e.title.trim()
+                out.toc[i] = TocEntry(if (num.isEmpty()) found.joinToString(" · ") else "$num ${found.joinToString(" · ")}", e.level, e.loc)
+            }
+        }
+    }
+
     private fun readNavList(ol: Element, level: Int, add: (String, Int, String) -> Unit) {
         for (li in ol.children()) {
             if (li.local() != "li") continue
             val label = li.children().firstOrNull { it.local() == "a" || it.local() == "span" }
-            val title = label?.text()?.trim().orEmpty()
-            val href = label?.attr("href").orEmpty()
+            var title = label?.text()?.trim().orEmpty()
+            if (title.none { it.isLetter() }) {
+                // e.g. <li><a href="..">5.</a> <span>Title</span></li>: use the whole entry's text.
+                val whole = li.childNodes().filterNot { it is Element && it.local() == "ol" }.joinToString(" ") {
+                    when (it) {
+                        is org.jsoup.nodes.TextNode -> it.text()
+                        is Element -> it.text()
+                        else -> ""
+                    }
+                }.replace(Regex("\\s+"), " ").trim()
+                if (whole.any { it.isLetter() }) title = whole
+            }
+            val href = label?.attr("href")?.ifEmpty { null } ?: li.children().firstOrNull { it.local() == "a" }?.attr("href").orEmpty()
             if (title.isNotEmpty() && href.isNotEmpty()) add(title, level, href)
             li.children().firstOrNull { it.local() == "ol" }?.let { readNavList(it, level + 1, add) }
         }
