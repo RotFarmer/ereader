@@ -16,6 +16,9 @@ android {
         targetSdk = 35
         versionCode = buildNumber
         versionName = "1.0.$buildNumber"
+        // Only 64-bit ARM (every current Samsung phone/tablet): the text-recognition engine
+        // is ~10 MB per processor type, so this keeps downloads small.
+        ndk { abiFilters += listOf("arm64-v8a") }
     }
 
     // A fixed key kept in the repo, so new builds update the app in place
