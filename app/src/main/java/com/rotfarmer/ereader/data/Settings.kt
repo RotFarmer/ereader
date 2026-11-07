@@ -52,6 +52,10 @@ class Settings(ctx: Context) {
     // Library
     var libraryTab by int("libraryTab", 0)
 
+    /** Dark-mode look for pictures/PDF pages, remembered per book (manga and novels want different things). */
+    fun darkPictures(bookId: Long): Int = prefs.getInt("darkPics_$bookId", 0)
+    fun setDarkPictures(bookId: Long, v: Int) = prefs.edit().putInt("darkPics_$bookId", v).apply()
+
     fun toolColor(tool: Int): Int = prefs.getInt("toolColor$tool", Tools.defaultColor(tool))
     fun setToolColor(tool: Int, color: Int) = prefs.edit().putInt("toolColor$tool", color).apply()
     fun toolWidth(tool: Int): Float = prefs.getFloat("toolWidth$tool", Tools.defaultWidth(tool))

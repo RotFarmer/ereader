@@ -219,6 +219,7 @@ class ReaderActivity : Activity(), ReaderView.Listener, PenToolbar.Callbacks {
         view.pdfCache = s.pdfCache
         view.renderer.images = s.images
         view.renderer.pdf = s.pdfCache
+        view.renderer.darkPictures = settings.darkPictures(book.id)
         view.rtl = s.flow?.let { isRtlDoc(it) } ?: false
         s.images?.onLoaded = { view.invalidateContent() }
         s.pdfCache?.onLoaded = { view.invalidateContent() }
@@ -322,6 +323,7 @@ class ReaderActivity : Activity(), ReaderView.Listener, PenToolbar.Callbacks {
         view.tapTurns = settings.tapTurns
         view.smartHighlight = settings.smartHighlight
         view.renderer.eink = settings.einkImages
+        session?.let { view.renderer.darkPictures = settings.darkPictures(it.book.id) }
         view.inkPainter.sensitivity = settings.pressure
         loading?.setTextColor(ui.fg)
         warmth.warmth = settings.warmth
@@ -1309,6 +1311,15 @@ class ReaderActivity : Activity(), ReaderView.Listener, PenToolbar.Callbacks {
                 rebuildEngine()
             }
         })
+        session?.let { s ->
+            c.addView(sectionTitle(this, "Pictures in dark mode (this book)", ui))
+            c.addView(Segmented(this, listOf("Invert", "Dim", "Original"), settings.darkPictures(s.book.id), ui) { v ->
+                settings.setDarkPictures(s.book.id, v)
+                view.renderer.darkPictures = v
+                view.invalidateContent()
+            })
+            c.addView(label(this, "Dim keeps manga and photos as drawn, just darker. Invert suits text PDFs and simple drawings.", ui, 12f, ui.muted).apply { setPadding(0, dp(4), 0, 0) })
+        }
         c.addView(sectionTitle(this, "Brightness", ui))
         val bright = slider(this, 100, ((if (settings.brightness < 0) 0.6f else settings.brightness) * 100).toInt(), ui) { v, _ ->
             settings.brightness = (v / 100f).coerceAtLeast(0.01f)

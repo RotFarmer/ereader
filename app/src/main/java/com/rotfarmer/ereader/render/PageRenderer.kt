@@ -24,6 +24,17 @@ class PageRenderer(private val density: Float) {
     var pdf: PdfCache? = null
     var eink = true
     var highlights: List<Highlight> = emptyList()
+    /** How pictures and PDF pages look in dark mode: [DARK_INVERT], [DARK_DIM] or [DARK_ORIGINAL]. */
+    var darkPictures = DARK_INVERT
+
+    /** Colour filter for a PDF page (or a drawing, when [lineArt]) in the current theme. */
+    fun pageFilter(lineArt: Boolean = true): android.graphics.ColorFilter? = when {
+        !colors.dark -> colors.pdfFilter
+        darkPictures == DARK_DIM -> colors.dimFilter
+        darkPictures == DARK_ORIGINAL -> null
+        lineArt -> colors.pdfFilter
+        else -> colors.imageFilter
+    }
 
     private val hlPaint = Paint(Paint.ANTI_ALIAS_FLAG)
     private val linePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { strokeWidth = density }
@@ -76,8 +87,7 @@ class PageRenderer(private val density: Float) {
             return
         }
         // In dark mode, drawings on a white background are inverted like the text; photos are only dimmed.
-        val invert = colors.dark && images?.isLineArt(item.path) == true
-        bmpPaint.colorFilter = if (invert) colors.pdfFilter else colors.imageFilter
+        bmpPaint.colorFilter = if (colors.dark) pageFilter(images?.isLineArt(item.path) == true) else colors.imageFilter
         c.drawBitmap(bmp, null, item.rect, bmpPaint)
     }
 
@@ -100,7 +110,7 @@ class PageRenderer(private val density: Float) {
             return
         }
         srcRect.set(0, (item.y0 * bmp.height).toInt(), bmp.width, (item.y1 * bmp.height).toInt())
-        bmpPaint.colorFilter = colors.pdfFilter
+        bmpPaint.colorFilter = pageFilter()
         c.drawBitmap(bmp, srcRect, item.rect, bmpPaint)
         if (!item.isWhole) {
             // A torn-paper hint where the page was split.
@@ -193,6 +203,10 @@ class PageRenderer(private val density: Float) {
     }
 
     companion object {
+        const val DARK_INVERT = 0
+        const val DARK_DIM = 1
+        const val DARK_ORIGINAL = 2
+
         fun closeCenter(r: RectF, density: Float) = android.graphics.PointF(r.right - 18 * density, r.top + 18 * density)
 
         /** The part of [start, end) that falls inside a text item, as absolute block offsets. */

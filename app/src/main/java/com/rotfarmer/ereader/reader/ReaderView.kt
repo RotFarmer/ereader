@@ -424,7 +424,7 @@ class ReaderView(ctx: Context) : View(ctx) {
         zoomMatrix.mapRect(r)
         canvas.save()
         canvas.clipRect(r)
-        overlay.colorFilter = colors.pdfFilter
+        overlay.colorFilter = renderer.pageFilter()
         canvas.drawBitmap(bmp, 0f, 0f, overlay)
         overlay.colorFilter = null
         canvas.restore()

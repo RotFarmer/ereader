@@ -34,6 +34,9 @@ class ReaderColors(val dark: Boolean) {
         ColorMatrixColorFilter(ColorMatrix().apply { setScale(0.82f, 0.82f, 0.82f, 1f) })
     } else multiplyBy(paper)
 
+    /** Dark mode "Dim": keeps pictures/pages as they are, but much less bright (white becomes a soft grey). */
+    val dimFilter: ColorMatrixColorFilter = ColorMatrixColorFilter(ColorMatrix().apply { setScale(0.58f, 0.56f, 0.53f, 1f) })
+
     fun highlight(color: Int): Int = if (dark) {
         Color.argb(0xD0, (Color.red(color) * 0.42f).toInt(), (Color.green(color) * 0.42f).toInt(), (Color.blue(color) * 0.42f).toInt())
     } else (color and 0x00FFFFFF) or 0x8C000000.toInt()
