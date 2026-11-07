@@ -45,6 +45,16 @@ class FlowEngine(
     private val ch = content.height()
 
     private val body = paint(spec.typeface, em)
+
+    /**
+     * Line-spacing multiplier that gives lines exactly spec.lineSpacing em apart, whatever the
+     * font's own line height is (Literata's is tall, Fraktur's short), so "Normal" feels the same.
+     */
+    private val bodyMult: Float = run {
+        val fm = body.fontMetrics
+        val natural = (fm.descent - fm.ascent).coerceAtLeast(1f)
+        (em * spec.lineSpacing / natural).coerceIn(0.8f, 2.6f)
+    }
     private val pre = paint(Typeface.MONOSPACE, em * 0.82f)
     private val caption = paint(spec.typeface, em * 0.86f)
     private val headings = HashMap<Int, TextPaint>()
@@ -291,12 +301,21 @@ class FlowEngine(
         val justify = alignment == Layout.Alignment.ALIGN_NORMAL && block.kind != TextBlock.PRE &&
             block.kind != TextBlock.HEADING && (block.align == TextBlock.ALIGN_JUSTIFY || (spec.justify && block.align == TextBlock.ALIGN_AUTO))
 
+        val mult = if (block.kind == TextBlock.HEADING) 1.1f else bodyMult
+        val hyphenate = block.kind == TextBlock.BODY || block.kind == TextBlock.QUOTE
         val builder = StaticLayout.Builder.obtain(text, 0, text.length, paint, width)
             .setAlignment(alignment)
-            .setLineSpacing(0f, if (block.kind == TextBlock.HEADING) 1.1f else spec.lineSpacing)
+            .setLineSpacing(0f, mult)
             .setIncludePad(false)
             .setBreakStrategy(LineBreaker.BREAK_STRATEGY_HIGH_QUALITY)
-            .setHyphenationFrequency(if (block.kind == TextBlock.BODY || block.kind == TextBlock.QUOTE) Layout.HYPHENATION_FREQUENCY_NORMAL else Layout.HYPHENATION_FREQUENCY_NONE)
+            // More hyphenation points when justifying, so word gaps don't get squeezed.
+            .setHyphenationFrequency(
+                when {
+                    !hyphenate -> Layout.HYPHENATION_FREQUENCY_NONE
+                    justify -> Layout.HYPHENATION_FREQUENCY_FULL
+                    else -> Layout.HYPHENATION_FREQUENCY_NORMAL
+                }
+            )
         if (justify) builder.setJustificationMode(LineBreaker.JUSTIFICATION_MODE_INTER_WORD)
 
         val firstIndent = spec.indent && from == 0 && block.kind == TextBlock.BODY &&
@@ -344,6 +363,12 @@ class FlowEngine(
             b.y += h
             line = end
             if (line < lineCount) b.newPage()
+        }
+        // StaticLayout leaves the line spacing off a paragraph's last line, which made the gap
+        // between paragraphs smaller than the gap between lines. Add it back.
+        if (block.kind != TextBlock.HEADING && lineCount > 0) {
+            val last = lineCount - 1
+            b.y += (layout.getLineBottom(last) - layout.getLineTop(last)) * (mult - 1f)
         }
         if (block.kind == TextBlock.HEADING) b.y += em * 0.6f
         if (block.kind == TextBlock.QUOTE || block.kind == TextBlock.PRE) b.y += em * 0.4f

@@ -80,7 +80,8 @@ class Settings(ctx: Context) {
 
     companion object {
         val FONT_SIZES = floatArrayOf(12f, 13f, 14f, 15f, 16f, 17.5f, 19f, 21f, 23f, 26f, 29f, 33f, 38f)
-        val LINE_SPACINGS = floatArrayOf(1.15f, 1.35f, 1.6f)
+        /** Distance between lines, in em (1.5 = one and a half times the text size). */
+        val LINE_SPACINGS = floatArrayOf(1.3f, 1.5f, 1.75f)
         val MARGINS_DP = intArrayOf(14, 28, 48)
     }
 }
