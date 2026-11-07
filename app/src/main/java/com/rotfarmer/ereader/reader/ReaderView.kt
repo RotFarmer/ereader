@@ -1014,17 +1014,13 @@ class ReaderView(ctx: Context) : View(ctx) {
     private fun spaceEdgeAt(x: Float, y: Float): SpaceItem? {
         if (engine?.isFixed != false) return null
         val page = currentPage() ?: return null
-        var best: SpaceItem? = null
-        var bestD = dp(26f)
+        // Only the grip itself (bottom centre), so long-presses elsewhere in the space open its menu.
         for (it in page.items) {
             if (it !is SpaceItem || it.space.kind != WritingSpace.FLOW) continue
-            if (x < it.rect.left - dp(8f) || x > it.rect.right + dp(8f)) continue
-            val d = abs(y - it.rect.bottom)
-            if (d < bestD) {
-                bestD = d; best = it
-            }
+            if (abs(x - it.rect.centerX()) > dp(70f)) continue
+            if (y >= it.rect.bottom - dp(24f) && y <= it.rect.bottom + dp(12f)) return it
         }
-        return best
+        return null
     }
 
     private fun drawSizing(c: Canvas) {
@@ -1045,7 +1041,7 @@ class ReaderView(ctx: Context) : View(ctx) {
         val bottom = minOf(top + h * s.content.height(), s.content.bottom)
         val rect = RectF(s.content.left, top, s.content.right, bottom)
         overlay.style = Paint.Style.FILL
-        overlay.color = colors.selection
+        overlay.color = (colors.faint and 0x00FFFFFF) or 0x55000000
         c.drawRect(rect, overlay)
         overlay.style = Paint.Style.STROKE
         overlay.strokeWidth = dp(2f)
@@ -1126,9 +1122,10 @@ class ReaderView(ctx: Context) : View(ctx) {
                     removeCallbacks(longPress)
                 }
                 val cand = resizeCandidate
-                if (resizing == null && cand != null && fMoved) {
+                if (resizing == null && cand != null && abs(dy) > slop * 2) {
                     resizeCandidate = null
-                    if (abs(dy) > abs(dx)) {
+                    // Only a clear up/down drag on the grip resizes.
+                    if (abs(dy) > abs(dx) * 1.5f) {
                         resizing = cand
                         removeCallbacks(longPress)
                     }
