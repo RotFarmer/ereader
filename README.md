@@ -21,8 +21,8 @@ The library checks for a newer build every few hours and shows a banner when one
 
 | Gesture | Action |
 | --- | --- |
-| Tap right side / swipe left | Next page |
-| Tap left side / swipe right | Previous page |
+| Tap the right two-thirds / swipe left | Next page |
+| Tap the left third (next to the pen toolbar) / swipe right | Previous page |
 | Tap top of the page | Menu |
 | Tap top-right corner | Bookmark this page |
 | Long-press text (finger) | Select → highlight, excerpt, copy, share, look up |
@@ -48,7 +48,7 @@ Old binary Word `.doc` files aren't supported. Save them as `.docx` first.
 - Pressure: line width (and pencil darkness) follows how hard you press. Sensitivity is adjustable.
 - Eraser: pick the eraser, or **hold the S Pen side button** while writing with any pen. Erasing over a text highlight removes it.
 - Highlighter on text snaps to whole words and becomes a real highlight (can be turned off).
-- Undo / redo on the toolbar.
+- Undo / redo on the toolbar: strokes, erasing, highlighter highlights, and adding, resizing or deleting writing spaces.
 - Tap the selected pen again to change its color and thickness.
 
 ### Writing space

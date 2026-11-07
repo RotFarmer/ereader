@@ -1239,7 +1239,13 @@ class ReaderView(ctx: Context) : View(ctx) {
         if (y < height * 0.14f) {
             listener?.onToggleChrome(); return
         }
-        val backZone = if (rtl) x > width * 0.72f else x < width * 0.28f
+        // The back zone is the first third of the visible page (so the pen toolbar can't cover it),
+        // plus the margin before it; everything else goes forward.
+        val c = spec?.content
+        val l = c?.left ?: 0f
+        val r = c?.right ?: width.toFloat()
+        val zone = (r - l) * 0.35f
+        val backZone = if (rtl) x > r - zone else x < l + zone
         if (backZone) prev() else next()
     }
 

@@ -557,8 +557,7 @@ class ReaderActivity : Activity(), ReaderView.Listener, PenToolbar.Callbacks {
             val sizes = floatArrayOf(0.25f, 0.5f, 0.75f, 1f)
             val cur = sizes.indices.minByOrNull { kotlin.math.abs(sizes[it] - space.height) } ?: 1
             c.addView(Segmented(this, listOf("¼ page", "½ page", "¾ page", "Full"), cur, ui) {
-                space.height = sizes[it]
-                s.updateSpace(space)
+                s.resizeSpace(space, sizes[it])
                 spacesChanged(space.loc.block)
             })
         }
@@ -570,6 +569,7 @@ class ReaderActivity : Activity(), ReaderView.Listener, PenToolbar.Callbacks {
                     .setPositiveButton("Delete") { _, _ ->
                         s.deleteSpace(space)
                         spacesChanged(if (space.kind == WritingSpace.FLOW) space.loc.block else -1)
+                        toast("Space deleted (Undo on the pen bar brings it back)")
                     }
                     .setNegativeButton("Cancel", null).show()
             }
@@ -633,8 +633,7 @@ class ReaderActivity : Activity(), ReaderView.Listener, PenToolbar.Callbacks {
     override fun onSpaceResized(space: WritingSpace, height: Float) {
         val s = session ?: return
         if (kotlin.math.abs(space.height - height) < 0.005f) return
-        space.height = height
-        s.updateSpace(space)
+        s.resizeSpace(space, height)
         spacesChanged(space.loc.block)
     }
 
@@ -650,6 +649,7 @@ class ReaderActivity : Activity(), ReaderView.Listener, PenToolbar.Callbacks {
         view.goTo(pos, flash = false)
         view.invalidateContent()
         onPageShown(view.pos)
+        updateUndo()
     }
 
     override fun onStrokeAdded(s: InkStroke) {
@@ -721,15 +721,18 @@ class ReaderActivity : Activity(), ReaderView.Listener, PenToolbar.Callbacks {
     }
 
     override fun onUndo() {
-        if (session?.undo() == true) {
-            view.invalidateContent(); updateUndo()
-        }
+        afterUndo(session?.undo() ?: return)
     }
 
     override fun onRedo() {
-        if (session?.redo() == true) {
-            view.invalidateContent(); updateUndo()
-        }
+        afterUndo(session?.redo() ?: return)
+    }
+
+    private fun afterUndo(r: BookSession.UndoResult) {
+        val sp = r.space
+        if (sp != null) spacesChanged(if (sp.kind == WritingSpace.FLOW) sp.loc.block else -1)
+        else view.invalidateContent()
+        updateUndo()
     }
 
     override fun onSideChanged() {

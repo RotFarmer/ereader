@@ -36,7 +36,19 @@ class BookSession(private val app: App, val book: Book) {
         val removed: List<InkStroke> = emptyList(),
         val hlAdded: List<Highlight> = emptyList(),
         val hlRemoved: List<Highlight> = emptyList(),
-    )
+        val spaceAdded: WritingSpace? = null,
+        val spaceRemoved: WritingSpace? = null,
+        /** Ink inside a removed (or un-added) space, restored with it. */
+        var spaceInk: List<InkStroke> = emptyList(),
+        val resized: WritingSpace? = null,
+        val oldHeight: Float = 0f,
+        val newHeight: Float = 0f,
+    ) {
+        val space: WritingSpace? get() = spaceAdded ?: spaceRemoved ?: resized
+    }
+
+    /** What an undo/redo changed, so the reader knows whether pages must be laid out again. */
+    class UndoResult(val space: WritingSpace?)
 
     private val undoStack = ArrayList<Edit>()
     private val redoStack = ArrayList<Edit>()
@@ -113,6 +125,12 @@ class BookSession(private val app: App, val book: Book) {
     }
 
     private fun apply(e: Edit, forward: Boolean) {
+        e.spaceAdded?.let { if (forward) restoreSpace(it, e.spaceInk) else e.spaceInk = removeSpace(it) }
+        e.spaceRemoved?.let { if (forward) e.spaceInk = removeSpace(it) else restoreSpace(it, e.spaceInk) }
+        e.resized?.let { sp ->
+            sp.height = if (forward) e.newHeight else e.oldHeight
+            write { db.saveSpace(sp) }
+        }
         val add = if (forward) e.added else e.removed
         val rem = if (forward) e.removed else e.added
         val hAdd = if (forward) e.hlAdded else e.hlRemoved
@@ -133,18 +151,18 @@ class BookSession(private val app: App, val book: Book) {
         }
     }
 
-    fun undo(): Boolean {
-        val e = undoStack.removeLastOrNull() ?: return false
+    fun undo(): UndoResult? {
+        val e = undoStack.removeLastOrNull() ?: return null
         apply(e, forward = false)
         redoStack += e
-        return true
+        return UndoResult(e.space)
     }
 
-    fun redo(): Boolean {
-        val e = redoStack.removeLastOrNull() ?: return false
+    fun redo(): UndoResult? {
+        val e = redoStack.removeLastOrNull() ?: return null
         apply(e, forward = true)
         undoStack += e
-        return true
+        return UndoResult(e.space)
     }
 
     // ---------------------------------------------------------------- highlights
@@ -195,15 +213,38 @@ class BookSession(private val app: App, val book: Book) {
     // ---------------------------------------------------------------- writing spaces
 
     fun addSpace(s: WritingSpace) {
-        ann.spaces += s
-        write { db.saveSpace(s) }
+        restoreSpace(s, emptyList())
+        push(Edit(spaceAdded = s))
     }
 
     fun updateSpace(s: WritingSpace) = write { db.saveSpace(s) }
 
+    fun resizeSpace(s: WritingSpace, height: Float) {
+        val old = s.height
+        s.height = height
+        push(Edit(resized = s, oldHeight = old, newHeight = height))
+        write { db.saveSpace(s) }
+    }
+
     fun deleteSpace(s: WritingSpace) {
+        val ink = removeSpace(s)
+        push(Edit(spaceRemoved = s, spaceInk = ink))
+    }
+
+    /** Removes a space and the ink in it; returns that ink so it can be restored. */
+    private fun removeSpace(s: WritingSpace): List<InkStroke> {
         ann.spaces.remove(s)
-        ann.ink.removeAnchor(Anchor.SPACE, s.id)
+        val ink = ArrayList(ann.ink.removeAnchor(Anchor.SPACE, s.id))
         write { db.deleteSpace(s.id) }
+        return ink
+    }
+
+    private fun restoreSpace(s: WritingSpace, ink: List<InkStroke>) {
+        if (s !in ann.spaces) ann.spaces += s
+        ink.forEach { ann.ink.add(it) }
+        write {
+            db.saveSpace(s)
+            if (ink.isNotEmpty()) db.insertStrokes(ink)
+        }
     }
 }
