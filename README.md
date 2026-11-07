@@ -15,7 +15,7 @@ Every push to the repository builds a fresh APK with GitHub Actions (see `.githu
 The library checks for a newer build every few hours and shows a banner when one is ready (or use **⋮ › Check for updates**). Tap it, confirm, and Android installs the update over the current version. Nothing is uninstalled and your data stays.
 
 - The first time, Android asks you to allow E-Reader to install apps ("Allow from this source"). This is a one-time switch.
-- This repository is **private**, so the app needs a read-only GitHub token to see updates: **⋮ › Update settings**. Create one at github.com › Settings › Developer settings › Fine-grained tokens, with access to only this repository and *Contents: Read-only*. If you make the repository public, no token is needed.
+- Updates come from this repository's public releases, so no account or token is needed. (If the repository is ever made private again, add a read-only token under **⋮ › Update settings**.)
 
 ## Reading
 
