@@ -308,6 +308,9 @@ class Overlay(private val root: FrameLayout) {
         }
         root.addView(scrim, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
         val maxW = minOf(ctx.dp(maxWidthDp), root.width - ctx.dp(16))
+        // Never let a panel collapse to a sliver (a vertical LinearLayout sizes itself only from
+        // its fixed-width children when it has any).
+        if (content.minimumWidth == 0) content.minimumWidth = minOf(ctx.dp(260), maxW)
         content.measure(
             View.MeasureSpec.makeMeasureSpec(maxW, View.MeasureSpec.AT_MOST),
             View.MeasureSpec.makeMeasureSpec(root.height - ctx.dp(32), View.MeasureSpec.AT_MOST)

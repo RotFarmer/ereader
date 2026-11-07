@@ -561,7 +561,7 @@ class ReaderActivity : Activity(), ReaderView.Listener, PenToolbar.Callbacks {
                 spacesChanged(space.loc.block)
             })
         }
-        c.addView(View(this), LinearLayout.LayoutParams(1, dp(12)))
+        c.addView(View(this), LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(12)))
         c.addView(TextButton(this, "Delete space and its writing", ui).apply {
             setOnClickListener { onDeleteSpace(space) }
         })
@@ -1104,7 +1104,7 @@ class ReaderActivity : Activity(), ReaderView.Listener, PenToolbar.Callbacks {
             notebookTab, ui
         ) { notebookTab = it; fillNotebook(list) }
         c.addView(tabs)
-        c.addView(View(this), LinearLayout.LayoutParams(1, dp(8)))
+        c.addView(View(this), LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(8)))
         fillNotebook(list)
         c.addView(scrollable(list, 0.66f))
         popups.show(c, anchorOf(anchor), below = true, maxWidthDp = 500)
@@ -1167,7 +1167,7 @@ class ReaderActivity : Activity(), ReaderView.Listener, PenToolbar.Callbacks {
                 } else {
                     list.addView(TextButton(this, "Share all excerpts", ui).apply {
                         setOnClickListener { share(s.ann.excerpts.joinToString("\n\n") { excerptText(it) }) }
-                    }, LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { bottomMargin = dp(6) })
+                    }, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { bottomMargin = dp(6) })
                 }
                 for (x in s.ann.excerpts.toList()) {
                     list.addView(excerptRow(x, list)); sep()
