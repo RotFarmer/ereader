@@ -114,6 +114,7 @@ object EpubParser {
                 val bytes = src.bytes(path) ?: continue
                 out.startChapter()
                 fileStarts[path] = Locator(out.blocks.size, 0)
+                out.anchors[path] = Locator(out.blocks.size, 0)
                 val type = item.attr("media-type")
                 val isXml = type.contains("xhtml") || type.contains("xml") || path.endsWith(".xhtml", true)
                 val doc = Jsoup.parse(ByteArrayInputStream(bytes), null, "", if (isXml) Parser.xmlParser() else Parser.htmlParser())

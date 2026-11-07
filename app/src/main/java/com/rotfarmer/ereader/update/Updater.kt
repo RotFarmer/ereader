@@ -71,6 +71,10 @@ object Updater {
             throw UpdateException("The latest release has no APK yet. It may still be building.")
         } catch (e: IOException) {
             throw UpdateException("Couldn't reach GitHub. Check your internet connection.")
+        } catch (e: UpdateException) {
+            throw e
+        } catch (e: Exception) {
+            throw UpdateException("GitHub sent an unexpected answer (${e.javaClass.simpleName}).")
         } finally {
             conn.disconnect()
         }

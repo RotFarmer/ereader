@@ -18,6 +18,7 @@ class App : Application() {
 
     override fun onCreate() {
         super.onCreate()
+        CrashActivity.install(this)
         instance = this
     }
 

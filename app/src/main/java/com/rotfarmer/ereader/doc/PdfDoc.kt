@@ -59,10 +59,11 @@ class PdfDoc(file: File) : Closeable {
     /** Renders [region] (page fractions 0..1) of page [i] about [width] pixels wide. */
     fun renderRegion(i: Int, region: RectF, width: Int): Bitmap {
         val s = pageSize(i)
-        val rw = region.width() * s.width
-        val rh = region.height() * s.height
-        val scale = width / rw.coerceAtLeast(1f)
-        val bmp = Bitmap.createBitmap(width.coerceAtLeast(1), (rh * scale).toInt().coerceAtLeast(1), Bitmap.Config.ARGB_8888)
+        val rw = (region.width() * s.width).coerceAtLeast(1f)
+        val rh = (region.height() * s.height).coerceAtLeast(1f)
+        // Fit within width x 3000 px so thin or tall regions can't make huge bitmaps.
+        val scale = minOf(width / rw, 3000f / rh)
+        val bmp = Bitmap.createBitmap((rw * scale).toInt().coerceAtLeast(1), (rh * scale).toInt().coerceAtLeast(1), Bitmap.Config.ARGB_8888)
         val m = Matrix().apply {
             setTranslate(-region.left * s.width, -region.top * s.height)
             postScale(scale, scale)

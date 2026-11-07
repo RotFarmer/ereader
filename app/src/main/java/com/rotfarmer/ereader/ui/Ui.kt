@@ -291,12 +291,17 @@ class Overlay(private val root: FrameLayout) {
     val isShowing: Boolean get() = stack.isNotEmpty()
 
     @SuppressLint("ClickableViewAccessibility")
-    fun show(content: View, anchor: RectF?, below: Boolean = true, onDismiss: (() -> Unit)? = null, maxWidthDp: Int = 420, alignRight: Boolean = false) {
+    fun show(
+        content: View, anchor: RectF?, below: Boolean = true, onDismiss: (() -> Unit)? = null,
+        maxWidthDp: Int = 420, alignRight: Boolean = false, passThrough: ((MotionEvent) -> Boolean)? = null,
+    ) {
         val ctx = root.context
         val scrim = object : View(ctx) {
             override fun dispatchTouchEvent(e: MotionEvent): Boolean {
                 val tt = e.getToolType(0)
                 if (tt == MotionEvent.TOOL_TYPE_STYLUS || tt == MotionEvent.TOOL_TYPE_ERASER) return false
+                // Let touches that start on something underneath (like selection handles) through.
+                if (e.actionMasked == MotionEvent.ACTION_DOWN && passThrough?.invoke(e) == true) return false
                 if (e.actionMasked == MotionEvent.ACTION_UP) dismissTop()
                 return true
             }
@@ -327,15 +332,16 @@ class Overlay(private val root: FrameLayout) {
         stack += Entry(scrim, content, onDismiss)
     }
 
-    fun dismissTop() {
+    fun dismissTop(notify: Boolean = true) {
         val e = stack.removeLastOrNull() ?: return
         root.removeView(e.content)
         root.removeView(e.scrim)
-        e.onDismiss?.invoke()
+        if (notify) e.onDismiss?.invoke()
     }
 
-    fun dismissAll() {
-        while (stack.isNotEmpty()) dismissTop()
+    /** [notify] = false when a popup is being replaced rather than closed by the user. */
+    fun dismissAll(notify: Boolean = true) {
+        while (stack.isNotEmpty()) dismissTop(notify)
     }
 }
 

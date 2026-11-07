@@ -52,6 +52,12 @@
             android:theme="@style/Theme.EReader.Reader"
             android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboardHidden|density|uiMode" />
 
+        <activity
+            android:name=".CrashActivity"
+            android:exported="false"
+            android:process=":crash"
+            android:excludeFromRecents="true" />
+
         <receiver
             android:name=".update.UpdateReceiver"
             android:exported="false" />

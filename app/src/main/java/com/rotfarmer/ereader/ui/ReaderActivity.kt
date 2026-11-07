@@ -64,6 +64,7 @@ import com.rotfarmer.ereader.reader.ReaderView
 import com.rotfarmer.ereader.reader.TextSel
 import com.rotfarmer.ereader.render.Fonts
 import com.rotfarmer.ereader.render.ReaderColors
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -195,8 +196,12 @@ class ReaderActivity : Activity(), ReaderView.Listener, PenToolbar.Callbacks {
         val s = BookSession(app, book)
         try {
             withContext(Dispatchers.IO) { s.open() }
+        } catch (e: CancellationException) {
+            s.close()
+            throw e
         } catch (e: Throwable) {
             s.close()
+            if (isFinishing || isDestroyed) return
             dialog(this, settings.dark).setTitle("Can't open this book")
                 .setMessage(e.message ?: "Something went wrong while opening the file.")
                 .setPositiveButton("OK") { _, _ -> finish() }
@@ -266,7 +271,7 @@ class ReaderActivity : Activity(), ReaderView.Listener, PenToolbar.Callbacks {
     @Suppress("DEPRECATION")
     private fun hideSystemBars() {
         if (Build.VERSION.SDK_INT >= 30) {
-            window.insetsController?.let {
+            window.decorView.windowInsetsController?.let {
                 it.hide(WindowInsets.Type.statusBars() or WindowInsets.Type.navigationBars())
                 it.systemBarsBehavior = WindowInsetsController.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
             }
@@ -280,7 +285,7 @@ class ReaderActivity : Activity(), ReaderView.Listener, PenToolbar.Callbacks {
     @Suppress("DEPRECATION")
     private fun showSystemBars() {
         if (Build.VERSION.SDK_INT >= 30) {
-            window.insetsController?.let {
+            window.decorView.windowInsetsController?.let {
                 it.show(WindowInsets.Type.statusBars())
                 val light = if (settings.dark) 0 else WindowInsetsController.APPEARANCE_LIGHT_STATUS_BARS
                 it.setSystemBarsAppearance(light, WindowInsetsController.APPEARANCE_LIGHT_STATUS_BARS)
@@ -372,7 +377,6 @@ class ReaderActivity : Activity(), ReaderView.Listener, PenToolbar.Callbacks {
         val h = view.height
         if (w == 0 || h == 0) return
         val loc = pendingLoc ?: currentLoc() ?: Locator(0, 0)
-        pendingLoc = null
         val spec = makeSpec(w, h, s)
         val pdf = s.pdf
         val engine: Engine = if (pdf != null) PdfEngine(pdf, spec, s.ann.spaces) else {
@@ -387,6 +391,7 @@ class ReaderActivity : Activity(), ReaderView.Listener, PenToolbar.Callbacks {
             }
             loading?.let { root.removeView(it) }
             loading = null
+            pendingLoc = null
             view.setEngine(engine, spec, pos)
             engine.startBackground(pos.ch) {
                 if (gen == engineGen) {
@@ -454,7 +459,7 @@ class ReaderActivity : Activity(), ReaderView.Listener, PenToolbar.Callbacks {
     }
 
     override fun onSelection(sel: TextSel, anchor: RectF) {
-        popups.dismissAll()
+        popups.dismissAll(notify = false)
         val c = card(this, ui, 10)
         val dots = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
         for (col in Tools.HIGHLIGHTER_COLORS.take(5)) {
@@ -477,7 +482,7 @@ class ReaderActivity : Activity(), ReaderView.Listener, PenToolbar.Callbacks {
         btn("Share") { share(text) }
         btn("Look up") { lookUp(text) }
         c.addView(row)
-        popups.show(c, anchor, below = false, onDismiss = { view.clearSelection() })
+        popups.show(c, anchor, below = false, onDismiss = { view.clearSelection() }, passThrough = { e -> view.hitsHandle(e.x, e.y) })
     }
 
     override fun onSelectionCleared() = popups.dismissAll()
@@ -516,7 +521,7 @@ class ReaderActivity : Activity(), ReaderView.Listener, PenToolbar.Callbacks {
     }
 
     override fun onRegion(page: Int, region: RectF, anchor: RectF) {
-        popups.dismissAll()
+        popups.dismissAll(notify = false)
         val c = card(this, ui, 10)
         val row = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
         fun btn(t: String, f: () -> Unit) = row.addView(TextButton(this, t, ui).apply {
@@ -527,7 +532,7 @@ class ReaderActivity : Activity(), ReaderView.Listener, PenToolbar.Callbacks {
         btn("Highlight") { highlightRegion(page, RectF(region)) }
         c.addView(label(this, "Drag the corners to adjust", ui, 12f, ui.muted).apply { setPadding(dp(4), 0, 0, dp(6)) }, 0)
         c.addView(row)
-        popups.show(c, anchor, below = true, onDismiss = { view.clearSelection() })
+        popups.show(c, anchor, below = true, onDismiss = { view.clearSelection() }, passThrough = { e -> view.hitsHandle(e.x, e.y) })
     }
 
     override fun onSpaceLongPress(space: WritingSpace, anchor: RectF) {
@@ -784,7 +789,8 @@ class ReaderActivity : Activity(), ReaderView.Listener, PenToolbar.Callbacks {
         view.invalidate()
     }
 
-    private fun inPage(loc: Locator, page: Page) = loc >= page.start && loc < page.end
+    private fun inPage(loc: Locator, page: Page) =
+        loc >= page.start && (loc < page.end || (page.start == page.end && loc == page.start))
 
     private fun updateBookmarkState(page: Page) {
         val b = session?.ann?.bookmarks?.any { inPage(it.loc, page) } == true
@@ -1386,7 +1392,7 @@ class ReaderActivity : Activity(), ReaderView.Listener, PenToolbar.Callbacks {
                     val bmp = pdf.renderRegion(page, region, 1100)
                     f.outputStream().use { bmp.compress(android.graphics.Bitmap.CompressFormat.PNG, 100, it) }
                     bmp.recycle()
-                } catch (_: Exception) {
+                } catch (_: Throwable) {
                 }
                 (if (f.exists()) f.absolutePath else null) to (pdf.textIn(page, region) ?: "")
             }

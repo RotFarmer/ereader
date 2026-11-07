@@ -89,6 +89,8 @@ class FlowEngine(
         val ps = chapterPages(c)
         var idx = 0
         for (i in ps.indices) if (ps[i].start <= loc) idx = i else break
+        // A full-page writing space starts where the next page starts; prefer the space.
+        while (idx > 0 && ps[idx - 1].start == loc && ps[idx].start == loc) idx--
         return PagePos(c, idx)
     }
 

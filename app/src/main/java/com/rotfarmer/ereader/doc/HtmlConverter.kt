@@ -74,6 +74,8 @@ class HtmlConverter(
     private val sb = SpannableStringBuilder()
     private var generation = 0
     private var pendingPrefix = 0
+    /** A list marker waiting for the first paragraph inside its list item. */
+    private var carry: String? = null
     private val lists = ArrayList<IntArray>() // [ordered 0/1, counter]
 
     fun convert(root: Element) {
@@ -122,6 +124,7 @@ class HtmlConverter(
         val start = sb.length
 
         if (tag == "li") {
+            carry = null
             val top = lists.lastOrNull()
             val prefix = if (top != null && top[0] == 1) {
                 top[1]++; "${top[1]}. "
@@ -190,10 +193,13 @@ class HtmlConverter(
 
     private fun text(raw: String, pre: Boolean) {
         if (pre) {
+            applyCarry()
             sb.append(raw.replace("\r\n", "\n"))
             return
         }
         var s = WS.replace(raw, " ")
+        if (s.isBlank() && sb.isEmpty()) return
+        applyCarry()
         if (s.isEmpty()) return
         if (s[0] == ' ' && (sb.isEmpty() || sb[sb.length - 1] == ' ' || sb[sb.length - 1] == '\n')) s = s.substring(1)
         if (s.isNotEmpty()) sb.append(s)
@@ -267,7 +273,24 @@ class HtmlConverter(
         return f?.coerceIn(0.6f, 2.4f)
     }
 
+    private fun applyCarry() {
+        val c = carry ?: return
+        if (sb.isNotEmpty()) return
+        sb.append(c)
+        pendingPrefix = c.length
+        carry = null
+    }
+
     private fun flush(ctx: Ctx) {
+        // "<li><p>text</p></li>": keep the bullet for the paragraph instead of a line of its own.
+        if (pendingPrefix > 0 && sb.length >= pendingPrefix && sb.substring(pendingPrefix).isBlank()) {
+            carry = sb.substring(0, pendingPrefix)
+            sb.clearSpans()
+            sb.clear()
+            generation++
+            pendingPrefix = 0
+            return
+        }
         var end = sb.length
         while (end > 0 && sb[end - 1].isWhitespace()) end--
         if (end < sb.length) sb.delete(end, sb.length)

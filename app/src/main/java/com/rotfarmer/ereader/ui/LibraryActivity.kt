@@ -43,6 +43,7 @@ import com.rotfarmer.ereader.update.Updater
 import android.provider.Settings as AndroidSettings
 import android.text.InputType
 import android.widget.EditText
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -111,7 +112,7 @@ class LibraryActivity : Activity() {
     private fun build() {
         ui = UiColors(settings.dark)
         if (Build.VERSION.SDK_INT >= 30) {
-            window.insetsController?.setSystemBarsAppearance(
+            window.decorView.windowInsetsController?.setSystemBarsAppearance(
                 if (settings.dark) 0 else WindowInsetsController.APPEARANCE_LIGHT_STATUS_BARS or WindowInsetsController.APPEARANCE_LIGHT_NAVIGATION_BARS,
                 WindowInsetsController.APPEARANCE_LIGHT_STATUS_BARS or WindowInsetsController.APPEARANCE_LIGHT_NAVIGATION_BARS
             )
@@ -162,12 +163,15 @@ class LibraryActivity : Activity() {
         header.addView(IconButton(this, Icons.MORE, ui).apply {
             contentDescription = "More"
             setOnClickListener {
+                val items = arrayListOf("Check for updates", "Update settings", "About")
+                if (com.rotfarmer.ereader.CrashActivity.hasReport(this@LibraryActivity)) items += "Last crash report"
                 dialog(this@LibraryActivity, settings.dark)
-                    .setItems(arrayOf("Check for updates", "Update settings", "About")) { _, i ->
+                    .setItems(items.toTypedArray()) { _, i ->
                         when (i) {
                             0 -> checkForUpdates(manual = true)
                             1 -> tokenDialog()
                             2 -> about()
+                            3 -> startActivity(Intent(this@LibraryActivity, com.rotfarmer.ereader.CrashActivity::class.java))
                         }
                     }.show()
             }
@@ -374,12 +378,15 @@ class LibraryActivity : Activity() {
                 status?.visibility = View.VISIBLE
                 try {
                     last = withContext(Dispatchers.IO) { Importer.import(app, uri) }
+                } catch (e: CancellationException) {
+                    throw e
                 } catch (e: ImportException) {
                     errors += e.message ?: "Couldn't add a file."
                 } catch (e: Exception) {
                     errors += "Couldn't add a file: ${e.message ?: e.javaClass.simpleName}"
                 }
             }
+            if (isFinishing || isDestroyed) return@launch
             status?.visibility = View.GONE
             settings.libraryTab = 0
             build()
@@ -420,6 +427,7 @@ class LibraryActivity : Activity() {
                         .setMessage("You have the newest build ($cur).").setPositiveButton("OK", null).show()
                 }
             } catch (e: UpdateException) {
+                if (isFinishing || isDestroyed) return@launch
                 status?.visibility = View.GONE
                 if (manual) {
                     val d = dialog(this@LibraryActivity, settings.dark).setTitle("Couldn't check for updates")
@@ -477,10 +485,14 @@ class LibraryActivity : Activity() {
                 }
                 status?.text = "Installing… confirm the update when Android asks."
                 withContext(Dispatchers.IO) { Updater.install(this@LibraryActivity, file) }
+            } catch (e: CancellationException) {
+                throw e
             } catch (e: UpdateException) {
+                if (isFinishing || isDestroyed) return@launch
                 status?.visibility = View.GONE
                 dialog(this@LibraryActivity, settings.dark).setTitle("Update failed").setMessage(e.message).setPositiveButton("OK", null).show()
             } catch (e: Exception) {
+                if (isFinishing || isDestroyed) return@launch
                 status?.visibility = View.GONE
                 dialog(this@LibraryActivity, settings.dark).setTitle("Update failed").setMessage(e.message ?: e.javaClass.simpleName).setPositiveButton("OK", null).show()
             } finally {

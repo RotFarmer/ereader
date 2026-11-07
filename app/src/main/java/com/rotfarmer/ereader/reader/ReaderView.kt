@@ -112,6 +112,10 @@ class ReaderView(ctx: Context) : View(ctx) {
     var paperTexture = true
     var flashEvery = 6
     var ghosting = false
+        set(v) {
+            field = v
+            if (!v) ghostNode = null
+        }
     var fingerDraw = false
     var smartHighlight = true
     var rtl = false
@@ -193,6 +197,7 @@ class ReaderView(ctx: Context) : View(ctx) {
     private var pinchDist = 0f
     private var pinchZoom = 1f
     private var pinchScale = 1f
+    private var pinched = false
     private val longPress = Runnable { onLongPress() }
 
     init {
@@ -949,7 +954,7 @@ class ReaderView(ctx: Context) : View(ctx) {
     private fun finger(e: MotionEvent, act: Int): Boolean {
         when (act) {
             MotionEvent.ACTION_DOWN -> {
-                fActive = true; fMoved = false; fLong = false; fMulti = false
+                fActive = true; fMoved = false; fLong = false; fMulti = false; pinched = false
                 fDownX = e.x; fDownY = e.y; fLastX = e.x; fLastY = e.y
                 fIgnore = palmLikely()
                 if (fIgnore) return true
@@ -976,6 +981,7 @@ class ReaderView(ctx: Context) : View(ctx) {
                 if (e.pointerCount >= 2 && fMulti) {
                     val d = hypot(e.getX(0) - e.getX(1), e.getY(0) - e.getY(1))
                     pinchScale = d / pinchDist
+                    if (abs(pinchScale - 1f) > 0.06f) pinched = true
                     if (engine?.isFixed == true) {
                         val fx = (e.getX(0) + e.getX(1)) / 2
                         val fy = (e.getY(0) + e.getY(1)) / 2
@@ -992,7 +998,7 @@ class ReaderView(ctx: Context) : View(ctx) {
                 if (dragHandle != 0) {
                     dragTo(e.x, e.y); return true
                 }
-                if (zoom > 1.001f && !fMulti && fMoved) {
+                if (zoom > 1.001f && fMoved && e.pointerCount == 1) {
                     panX += e.x - fLastX
                     panY += e.y - fLastY
                     clampPan()
@@ -1025,6 +1031,10 @@ class ReaderView(ctx: Context) : View(ctx) {
                 }
                 if (fLong) return true
                 if (fMulti) {
+                    if (pinched) {
+                        if (zoom > 1.001f) requestHiRes()
+                        return true
+                    }
                     // Two-finger swipe still turns pages (useful with finger drawing on).
                     val dx = e.x - fDownX
                     if (engine?.isFixed != true || zoom <= 1.001f) {
@@ -1132,6 +1142,9 @@ class ReaderView(ctx: Context) : View(ctx) {
             }
         }
     }
+
+    /** True if (x, y) is on a selection handle or a PDF region corner. */
+    fun hitsHandle(x: Float, y: Float): Boolean = (selection != null || region != null) && hitHandle(x, y) != 0
 
     private fun hitHandle(x: Float, y: Float): Int {
         val page = currentPage() ?: return 0
