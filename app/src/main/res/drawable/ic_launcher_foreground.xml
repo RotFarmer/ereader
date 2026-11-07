@@ -1,0 +1,37 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- An open book with a pen nib, drawn in e-ink black. 108dp canvas, 66dp safe zone. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <!-- left page -->
+    <path
+        android:fillColor="#00000000"
+        android:strokeColor="#1C1C1C"
+        android:strokeWidth="2.6"
+        android:strokeLineJoin="round"
+        android:pathData="M54,38 C47,34 38,33 30,34 L30,72 C38,71 47,72 54,76 Z" />
+    <!-- right page -->
+    <path
+        android:fillColor="#00000000"
+        android:strokeColor="#1C1C1C"
+        android:strokeWidth="2.6"
+        android:strokeLineJoin="round"
+        android:pathData="M54,38 C61,34 70,33 78,34 L78,72 C70,71 61,72 54,76 Z" />
+    <!-- text lines -->
+    <path
+        android:strokeColor="#1C1C1C"
+        android:strokeWidth="1.6"
+        android:strokeLineCap="round"
+        android:pathData="M35,43 L49,44.5 M35,49 L49,50.5 M35,55 L49,56.5 M35,61 L45,62" />
+    <!-- pen nib writing on the right page -->
+    <path
+        android:fillColor="#1C1C1C"
+        android:pathData="M74,40 L78.5,44.5 L64,59 L58.5,60.5 L60,55 Z" />
+    <path
+        android:strokeColor="#1C1C1C"
+        android:strokeWidth="1.6"
+        android:strokeLineCap="round"
+        android:pathData="M59,66 C62,63.5 65,67 68,64.5 C70,63 72,65 74,64" />
+</vector>
