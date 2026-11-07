@@ -335,7 +335,9 @@ class ReaderView(ctx: Context) : View(ctx) {
         if (zoomed) canvas.concat(zoomMatrix)
         if (hw) {
             if (contentDirty) {
-                val c = contentNode.apply { setPosition(0, 0, width, height) }.beginRecording()
+                // Note: not inside apply{} — RenderNode has its own width/height that would shadow the view's.
+                contentNode.setPosition(0, 0, width, height)
+                val c = contentNode.beginRecording(width, height)
                 renderer.highlights = ann.highlights
                 renderer.draw(c, page)
                 contentNode.endRecording()
@@ -363,7 +365,8 @@ class ReaderView(ctx: Context) : View(ctx) {
         if (zoomed) canvas.concat(zoomMatrix)
         if (hw) {
             if (inkDirty) {
-                val c = inkNode.apply { setPosition(0, 0, width, height) }.beginRecording()
+                inkNode.setPosition(0, 0, width, height)
+                val c = inkNode.beginRecording(width, height)
                 drawInk(c, page)
                 inkNode.endRecording()
                 inkDirty = false
