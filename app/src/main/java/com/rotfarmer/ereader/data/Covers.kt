@@ -191,14 +191,97 @@ object Covers {
      * to use instead; otherwise null.
      */
     fun betterThan(ctx: Context, book: Book, picture: Bitmap?): Bitmap? {
-        if (book.format != BookFormat.EPUB && book.format != BookFormat.MOBI) return null
-        val pic = picture ?: return null
-        val text = recognizeText(pic) ?: return null
-        if (showsTitle(text, book.title)) return null
-        return titlePage(ctx, book)
+        if (book.format != BookFormat.EPUB && book.format != BookFormat.MOBI && book.format != BookFormat.PDF) return null
+        val pic = picture ?: if (book.format == BookFormat.PDF) pictures(book)?.use { it.render(0, 480) } else null
+        val blank = pic == null || isBlank(pic)
+        if (pic != null && !blank) {
+            val text = recognizeText(pic) ?: return null
+            if (showsTitle(text, book.title)) return null
+        }
+        if (book.format != BookFormat.PDF) titlePage(ctx, book)?.let { return it }
+        // Scanned books and comics: look for the page / picture that shows the title.
+        return scanPictures(book, keepFirstIfNoTitle = !blank)
     }
 
-    private const val CHECKED = "coversChecked"
+    /** Pages (PDF) or pictures (EPUB / MOBI) that could serve as a cover, in reading order. */
+    interface PictureSource : java.io.Closeable {
+        val count: Int
+        fun render(i: Int, width: Int): Bitmap?
+    }
+
+    private class PdfPictures(file: File) : PictureSource {
+        private val pdf = com.rotfarmer.ereader.doc.PdfDoc(file)
+        override val count = minOf(pdf.pageCount, 40)
+        override fun render(i: Int, width: Int): Bitmap? = try {
+            pdf.renderPage(i, width)
+        } catch (e: Throwable) {
+            null
+        }
+
+        override fun close() = pdf.close()
+    }
+
+    private class BookPictures(private val doc: FlowDocument, cover: String?) : PictureSource {
+        private val paths = (listOfNotNull(cover) + doc.blocks.filterIsInstance<com.rotfarmer.ereader.doc.ImageBlock>().map { it.path })
+            .distinct().take(40)
+        override val count = paths.size
+        override fun render(i: Int, width: Int): Bitmap? = try {
+            doc.res.open(paths[i])?.use { it.readBytes() }?.let { Importer.decodeScaled(it, width) }
+        } catch (e: Throwable) {
+            null
+        }
+
+        override fun close() = doc.close()
+    }
+
+    fun pictures(book: Book): PictureSource? = try {
+        val f = File(book.path)
+        when (book.format) {
+            BookFormat.PDF -> PdfPictures(f)
+            BookFormat.EPUB -> BookPictures(EpubParser.parse(f, book.title), EpubParser.coverPathOf(f))
+            BookFormat.MOBI -> BookPictures(MobiParser.parse(f, book.title), null)
+            else -> null
+        }
+    } catch (e: Throwable) {
+        null
+    }
+
+    /** A page that is (nearly) one flat colour: blank pages, black endpapers. */
+    fun isBlank(b: Bitmap): Boolean {
+        val n = 32
+        var sum = 0.0
+        var sq = 0.0
+        var count = 0
+        for (yi in 0 until n) for (xi in 0 until n) {
+            val c = b.getPixel(xi * (b.width - 1) / (n - 1), yi * (b.height - 1) / (n - 1))
+            val l = 0.299 * ((c shr 16) and 0xFF) + 0.587 * ((c shr 8) and 0xFF) + 0.114 * (c and 0xFF)
+            sum += l; sq += l * l; count++
+        }
+        val mean = sum / count
+        val std = kotlin.math.sqrt((sq / count - mean * mean).coerceAtLeast(0.0))
+        return std < 9.0
+    }
+
+    /**
+     * Reads the first pages / pictures and returns the first one that shows the title. If none
+     * does, returns the first non-blank one unless [keepFirstIfNoTitle].
+     */
+    private fun scanPictures(book: Book, keepFirstIfNoTitle: Boolean, limit: Int = 12): Bitmap? {
+        val src = pictures(book) ?: return null
+        src.use { s ->
+            var firstReal: Bitmap? = null
+            for (i in 0 until minOf(s.count, limit)) {
+                val bmp = s.render(i, 600) ?: continue
+                if (isBlank(bmp)) continue
+                if (firstReal == null) firstReal = bmp
+                val text = recognizeText(bmp) ?: break
+                if (showsTitle(text, book.title)) return bmp
+            }
+            return if (keepFirstIfNoTitle) null else firstReal
+        }
+    }
+
+    private const val CHECKED = "coversChecked2"
 
     fun isChecked(app: App, id: Long) = app.settings.prefs.getStringSet(CHECKED, emptySet())!!.contains(id.toString())
 

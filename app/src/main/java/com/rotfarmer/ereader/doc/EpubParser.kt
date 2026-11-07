@@ -81,6 +81,13 @@ object EpubParser {
         Meta(title, author, coverPath(src, opf))
     }
 
+    /** Path of the cover picture inside the book, if it declares one. */
+    fun coverPathOf(file: File): String? = try {
+        ZipSource(file).use { src -> coverPath(src, readOpf(src)) }
+    } catch (e: Exception) {
+        null
+    }
+
     fun coverBytes(file: File): ByteArray? = try {
         ZipSource(file).use { src -> coverPath(src, readOpf(src))?.let { src.bytes(it) } }
     } catch (e: Exception) {

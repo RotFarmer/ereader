@@ -310,7 +310,7 @@ class LibraryActivity : Activity() {
     /** Once per book: if its cover picture doesn't show the title, use the title page. */
     private fun checkCovers() {
         if (coverCheckRunning) return
-        val todo = books.filter { (it.format == BookFormat.EPUB || it.format == BookFormat.MOBI) && !Covers.isChecked(app, it.id) }
+        val todo = books.filter { (it.format == BookFormat.EPUB || it.format == BookFormat.MOBI || it.format == BookFormat.PDF) && !Covers.isChecked(app, it.id) }
         if (todo.isEmpty()) return
         coverCheckRunning = true
         scope.launch {
@@ -335,9 +335,14 @@ class LibraryActivity : Activity() {
     }
 
     private fun changeCover(b: Book) {
-        val options = arrayOf("The book's cover picture", "The title page", "Plain: title and author")
+        val canPick = b.format == BookFormat.PDF || b.format == BookFormat.EPUB || b.format == BookFormat.MOBI
+        val options = if (canPick) arrayOf("The book's cover picture", "The title page", "Plain: title and author", "Pick a page…")
+        else arrayOf("The book's cover picture", "The title page", "Plain: title and author")
         dialog(this, settings.dark).setTitle("Cover for “${b.title}”")
             .setItems(options) { _, i ->
+                if (i == 3) {
+                    pickPage(b); return@setItems
+                }
                 scope.launch {
                     val bmp = withContext(Dispatchers.IO) {
                         try {
@@ -360,6 +365,81 @@ class LibraryActivity : Activity() {
                     bookAdapter.notifyDataSetChanged()
                 }
             }.show()
+    }
+
+    /** A grid of the book's first pages / pictures; tap one to make it the cover. */
+    private fun pickPage(b: Book) {
+        val grid = GridView(this).apply {
+            numColumns = 3
+            horizontalSpacing = dp(8)
+            verticalSpacing = dp(8)
+            setPadding(dp(12), dp(8), dp(12), dp(8))
+            stretchMode = GridView.STRETCH_COLUMN_WIDTH
+            selector = android.graphics.drawable.ColorDrawable(Color.TRANSPARENT)
+        }
+        val thumbs = ArrayList<Bitmap?>()
+        var source: Covers.PictureSource? = null
+        var picked = false
+        val adapter = object : BaseAdapter() {
+            override fun getCount() = thumbs.size
+            override fun getItem(position: Int) = thumbs[position]
+            override fun getItemId(position: Int) = position.toLong()
+            override fun getView(position: Int, convertView: View?, parent: ViewGroup?): View {
+                val iv = (convertView as? ImageView) ?: CoverView(this@LibraryActivity).apply {
+                    scaleType = ImageView.ScaleType.FIT_CENTER
+                    background = panelBg(context, ui, 2f, 1f, ui.soft)
+                }
+                iv.setImageBitmap(thumbs[position])
+                return iv
+            }
+        }
+        grid.adapter = adapter
+        val d = dialog(this, settings.dark).setTitle("Tap the page to use as the cover").setView(grid)
+            .setNegativeButton("Cancel", null).create()
+        val job = scope.launch {
+            val src = withContext(Dispatchers.IO) { Covers.pictures(b) }
+            if (src == null) {
+                d.dismiss()
+                Toast.makeText(this@LibraryActivity, "Couldn't read this book's pages", Toast.LENGTH_SHORT).show()
+                return@launch
+            }
+            source = src
+            for (i in 0 until src.count) {
+                val bmp = withContext(Dispatchers.IO) { src.render(i, 220) }
+                thumbs += bmp
+                adapter.notifyDataSetChanged()
+            }
+        }
+        grid.setOnItemClickListener { _, _, pos, _ ->
+            val src = source ?: return@setOnItemClickListener
+            picked = true
+            job.cancel()
+            d.dismiss()
+            scope.launch {
+                val bmp = withContext(Dispatchers.IO) { src.render(pos, 600) }
+                if (bmp != null) {
+                    withContext(Dispatchers.IO) { Covers.save(app, b, bmp) }
+                    Covers.markChecked(app, b.id)
+                    b.coverPath?.let { covers.remove(it) }
+                    bookAdapter.notifyDataSetChanged()
+                }
+                withContext(Dispatchers.IO) { src.close() }
+            }
+        }
+        d.setOnDismissListener {
+            job.cancel()
+            // When a page was picked, the picking code closes the book after rendering it.
+            if (!picked) scope.launch {
+                job.join()
+                withContext(Dispatchers.IO) {
+                    try {
+                        source?.close()
+                    } catch (_: Exception) {
+                    }
+                }
+            }
+        }
+        d.show()
     }
 
     private fun excerptText(x: Excerpt) = (if (x.text.isNotBlank()) "“${x.text}”" else "(picture excerpt)") +
