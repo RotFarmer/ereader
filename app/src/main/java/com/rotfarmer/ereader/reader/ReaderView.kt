@@ -679,6 +679,11 @@ class ReaderView(ctx: Context) : View(ctx) {
                         cancelPen()
                         fActive = true; fMulti = true; fIgnore = false; fMoved = true
                         fDownX = e.getX(0); fDownY = e.getY(0)
+                        if (e.pointerCount >= 2) {
+                            pinchDist = hypot(e.getX(0) - e.getX(1), e.getY(0) - e.getY(1)).coerceAtLeast(1f)
+                        }
+                        pinchZoom = zoom
+                        pinchScale = 1f
                     }
                     return true
                 }
@@ -1133,7 +1138,7 @@ class ReaderView(ctx: Context) : View(ctx) {
             handlePoint(page, sel.end, true)?.let { if (hypot(it.x - x, it.y + dp(12f) - y) < r) return 2 }
         }
         region?.let { rg ->
-            val sr = regionScreenRect(page, rg) ?: return 0
+            val sr = regionScreenRect(page, rg)?.let { toScreen(it) } ?: return 0
             val corners = listOf(PointF(sr.left, sr.top), PointF(sr.right, sr.top), PointF(sr.left, sr.bottom), PointF(sr.right, sr.bottom))
             corners.forEachIndexed { i, c -> if (hypot(c.x - x, c.y - y) < r) return 10 + i }
             if (sr.contains(x, y)) {

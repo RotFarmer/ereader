@@ -1,0 +1,80 @@
+# E-Reader
+
+An Android e-reader for tablets that looks and feels like a Kindle-style e-ink reader, with full S Pen support for writing, drawing and highlighting.
+
+## Install
+
+1. On your tablet, open the [latest release](../../releases/tag/latest) and download **E-Reader.apk**.
+2. Open the downloaded file. If Android asks, allow your browser or file manager to install apps.
+3. New builds install over the old one and keep your books, highlights and drawings.
+
+Every push to the repository builds a fresh APK with GitHub Actions (see `.github/workflows/build.yml`).
+
+## Reading
+
+| Gesture | Action |
+| --- | --- |
+| Tap right side / swipe left | Next page |
+| Tap left side / swipe right | Previous page |
+| Tap top of the page | Menu |
+| Tap top-right corner | Bookmark this page |
+| Long-press text (finger) | Select → highlight, excerpt, copy, share, look up |
+| Long-press a PDF page (finger) | Select a region → save excerpt, copy text, highlight |
+| Pinch | Zoom a PDF page, or change text size in books |
+| Tap the page number | Cycle: page · time left in chapter · time left in book · location |
+| Volume keys | Turn pages (can be turned off) |
+
+Your **finger** only turns pages, selects and opens menus. The **S Pen** only writes, draws, highlights and erases, and never turns pages. While the pen hovers near the screen, finger and palm touches are ignored.
+
+## Formats
+
+- **EPUB** (EPUB 2 and 3, with table of contents, images, basic styling, internal links)
+- **PDF** (rendered with Android's PDF engine; text copy needs Android 15+)
+- **Word .docx** (headings, bold/italic/underline, lists, pictures, page breaks)
+- Plain text and HTML
+
+Old binary Word `.doc` files aren't supported. Save them as `.docx` first.
+
+## S Pen
+
+- Pens: ballpoint, fountain pen, calligraphy, pencil, marker, highlighter, each with its own color and thickness.
+- Pressure: line width (and pencil darkness) follows how hard you press. Sensitivity is adjustable.
+- Eraser: pick the eraser, or **hold the S Pen side button** while writing with any pen. Erasing over a text highlight removes it.
+- Highlighter on text snaps to whole words and becomes a real highlight (can be turned off).
+- Undo / redo on the toolbar.
+- Tap the selected pen again to change its color and thickness.
+
+### Writing space
+
+Tap the ⇕ button on the pen toolbar, then tap the page where you want room to write:
+
+- In books, choose a small, half, large or full-page space. It stays attached to that spot in the text even if you change the font size.
+- In PDFs, **split the page** at that point (the rest of the page moves to the next screen), or add a **blank page** after it.
+
+Long-press a writing space to switch between blank, lined, grid and dotted paper, resize it, or delete it.
+
+## Notebook and excerpts
+
+- **Notebook** (open-book icon in the menu): all bookmarks, highlights and excerpts in the book. Tap any of them to jump to it; the passage is outlined so you can find it on the page.
+- **Excerpts** tab in the library: excerpts from every book, newest first. Tap one to open the book at that exact spot.
+
+## Appearance
+
+- Light and dark mode, brightness, and a warm-light slider.
+- Fonts: Literata (similar to Kindle's Bookerly), Serif, Atkinson Hyperlegible, Sans, **Gothic** (Grenze Gotisch blackletter) and **Fraktur** (UnifrakturMaguntia).
+- Text size, line spacing, margins, justification and paragraph indents.
+- E-ink effects: paper grain, page-refresh flash (off / every page / every 6 pages), optional ghosting, and pictures shown in 16 dithered grays like a real e-ink panel.
+
+## Building
+
+```
+./gradlew assembleRelease
+```
+
+Requires JDK 17 and the Android SDK (compile SDK 35). The app uses only the Android framework, Kotlin coroutines and Jsoup.
+
+The signing key `app/ereader.keystore` is committed on purpose so every build can update the installed app in place. It only protects this personal app; don't reuse it for anything else.
+
+## Credits
+
+Fonts are under the SIL Open Font License (see `app/src/main/assets/fonts/OFL-*.txt`): Literata, Atkinson Hyperlegible, Grenze Gotisch, UnifrakturMaguntia. Icons: Material Icons (Apache 2.0).

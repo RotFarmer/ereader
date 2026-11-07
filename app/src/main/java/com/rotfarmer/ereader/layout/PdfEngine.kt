@@ -107,9 +107,20 @@ class PdfEngine(val pdf: PdfDoc, val spec: LayoutSpec, spaces: List<WritingSpace
         }
     }
 
+    @Volatile private var cancelled = false
+
     override fun startBackground(fromChapter: Int, onReady: () -> Unit) {
         onReady()
+        // Measure every page up front so turning pages never waits on the renderer.
+        Thread({
+            for (i in 0 until pdf.pageCount) {
+                if (cancelled) return@Thread
+                pdf.pageSize(i)
+            }
+        }, "pdf-sizes").apply { isDaemon = true; priority = Thread.MIN_PRIORITY; start() }
     }
 
-    override fun cancel() {}
+    override fun cancel() {
+        cancelled = true
+    }
 }

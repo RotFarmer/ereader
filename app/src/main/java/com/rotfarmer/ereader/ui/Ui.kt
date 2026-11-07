@@ -84,6 +84,8 @@ fun panelBg(ctx: Context, c: UiColors, radius: Float = 8f, stroke: Float = 1.5f,
 /** A square icon button; pressed or [active] buttons are drawn inverted, like e-ink UIs. */
 @SuppressLint("ViewConstructor")
 class IconButton(ctx: Context, glyph: String, private val c: UiColors, sizeDp: Int = 46) : TextView(ctx) {
+    // Android can call setPressed/setEnabled from the super constructor, before fields exist.
+    private var ready = false
     var active = false
         set(v) {
             field = v; refresh()
@@ -98,6 +100,7 @@ class IconButton(ctx: Context, glyph: String, private val c: UiColors, sizeDp: I
         isFocusable = true
         layoutParams = LinearLayout.LayoutParams(dp(sizeDp), dp(sizeDp))
         includeFontPadding = false
+        ready = true
         refresh()
     }
 
@@ -107,6 +110,7 @@ class IconButton(ctx: Context, glyph: String, private val c: UiColors, sizeDp: I
     }
 
     private fun refresh() {
+        if (!ready) return
         val inv = isPressed || active
         setTextColor(if (inv) c.bg else if (isEnabled) c.fg else c.muted)
         background = if (inv) GradientDrawable().apply { setColor(c.fg); cornerRadius = dp(6).toFloat() } else null
@@ -121,6 +125,7 @@ class IconButton(ctx: Context, glyph: String, private val c: UiColors, sizeDp: I
 /** A rectangular bordered button with a label. */
 @SuppressLint("ViewConstructor")
 class TextButton(ctx: Context, label: String, private val c: UiColors, private val filled: Boolean = false) : TextView(ctx) {
+    private var ready = false
     var active = false
         set(v) {
             field = v; refresh()
@@ -136,6 +141,7 @@ class TextButton(ctx: Context, label: String, private val c: UiColors, private v
         setPadding(dp(14), dp(8), dp(14), dp(8))
         maxLines = 1
         ellipsize = TextUtils.TruncateAt.END
+        ready = true
         refresh()
     }
 
@@ -145,6 +151,7 @@ class TextButton(ctx: Context, label: String, private val c: UiColors, private v
     }
 
     private fun refresh() {
+        if (!ready) return
         val inv = isPressed || active || filled
         setTextColor(if (inv) c.bg else c.fg)
         background = panelBg(context, c, 6f, 1.2f, if (inv) c.fg else c.bg)

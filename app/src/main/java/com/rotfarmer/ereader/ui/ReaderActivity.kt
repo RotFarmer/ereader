@@ -168,6 +168,20 @@ class ReaderActivity : Activity(), ReaderView.Listener, PenToolbar.Callbacks {
         session?.close()
     }
 
+    // Like an e-ink reader, the screen stays on while you read or write, then sleeps when idle.
+    private val releaseScreen = Runnable { window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON) }
+
+    private fun keepAwake() {
+        window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        root.removeCallbacks(releaseScreen)
+        root.postDelayed(releaseScreen, 5 * 60_000L)
+    }
+
+    override fun dispatchTouchEvent(ev: MotionEvent): Boolean {
+        if (ev.actionMasked == MotionEvent.ACTION_DOWN) keepAwake()
+        return super.dispatchTouchEvent(ev)
+    }
+
     override fun onWindowFocusChanged(hasFocus: Boolean) {
         super.onWindowFocusChanged(hasFocus)
         if (hasFocus && !chromeVisible) hideSystemBars()
@@ -402,6 +416,7 @@ class ReaderActivity : Activity(), ReaderView.Listener, PenToolbar.Callbacks {
         val s = session ?: return
         val e = view.engine ?: return
         val page = e.page(pos.ch, pos.idx)
+        keepAwake()
         val now = SystemClock.elapsedRealtime()
         val prev = lastPos
         if (prev != null && prev != pos && e.next(prev) == pos) learnSpeed(now - pageShownAt, lastPageChars)
