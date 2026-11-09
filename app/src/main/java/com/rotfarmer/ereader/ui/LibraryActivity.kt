@@ -29,6 +29,7 @@ import android.widget.GridView
 import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.ListView
+import android.widget.ScrollView
 import android.widget.TextView
 import android.widget.Toast
 import com.rotfarmer.ereader.App
@@ -40,6 +41,9 @@ import com.rotfarmer.ereader.data.Excerpt
 import com.rotfarmer.ereader.data.ImportException
 import com.rotfarmer.ereader.data.Importer
 import com.rotfarmer.ereader.render.ReaderColors
+import com.rotfarmer.ereader.sketch.SketchActivity
+import com.rotfarmer.ereader.sketch.SketchStore
+import com.rotfarmer.ereader.sketch.Sketchbook
 import com.rotfarmer.ereader.update.UpdateException
 import com.rotfarmer.ereader.update.Updater
 import android.provider.Settings as AndroidSettings
@@ -66,6 +70,8 @@ class LibraryActivity : Activity() {
     private var status: TextView? = null
     private var books: List<Book> = emptyList()
     private var excerpts: List<Excerpt> = emptyList()
+    private val sketches by lazy { SketchStore(this) }
+    private var sketchbooks: List<Sketchbook> = emptyList()
     private var sortMode = 0
     private val bookAdapter = BookAdapter()
     private val excerptAdapter = ExcerptAdapter()
@@ -159,8 +165,8 @@ class LibraryActivity : Activity() {
             }
         })
         header.addView(IconButton(this, Icons.ADD, ui).apply {
-            contentDescription = "Add books"
-            setOnClickListener { openPicker() }
+            contentDescription = "Add books or sketchbooks"
+            setOnClickListener { if (settings.libraryTab == 2) createSketchbook() else openPicker() }
         })
         header.addView(IconButton(this, Icons.MORE, ui).apply {
             contentDescription = "More"
@@ -180,7 +186,7 @@ class LibraryActivity : Activity() {
         })
         root.addView(header)
 
-        val tabs = Segmented(this, listOf("Books", "Excerpts"), settings.libraryTab, ui) {
+        val tabs = Segmented(this, listOf("Books", "Excerpts", "Sketchbooks"), settings.libraryTab.coerceIn(0, 2), ui) {
             settings.libraryTab = it; showTab()
         }
         root.addView(tabs, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply {
@@ -222,7 +228,7 @@ class LibraryActivity : Activity() {
                 setOnItemLongClickListener { _, _, pos, _ -> bookMenu(books[pos]); true }
             }
             content.addView(grid)
-        } else {
+        } else if (settings.libraryTab == 1) {
             if (excerpts.isEmpty()) {
                 content.addView(emptyView("No excerpts yet", "While reading, long-press text (or a part of a PDF page) and choose Excerpt. Your excerpts from every book appear here."))
                 return
@@ -238,7 +244,75 @@ class LibraryActivity : Activity() {
                 setOnItemLongClickListener { _, _, pos, _ -> excerptMenu(excerpts[pos]); true }
             }
             content.addView(list)
+        } else {
+            showSketchbooks()
         }
+    }
+
+    private fun showSketchbooks() {
+        val scroll = ScrollView(this)
+        val list = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(20), dp(12), dp(20), dp(24))
+        }
+        list.addView(TextButton(this, "New sketchbook", ui, filled = true).apply {
+            setOnClickListener { createSketchbook() }
+        })
+        if (sketchbooks.isEmpty()) {
+            list.addView(label(this, "No sketchbooks yet. Create one to start drawing.", ui, 16f, ui.muted).apply {
+                setPadding(0, dp(24), 0, 0)
+            })
+        }
+        for (sketch in sketchbooks) {
+            val row = LinearLayout(this).apply {
+                orientation = LinearLayout.VERTICAL
+                setPadding(dp(16), dp(14), dp(16), dp(14))
+                background = panelBg(this@LibraryActivity, ui, 8f)
+                setOnClickListener { startActivity(SketchActivity.intent(this@LibraryActivity, sketch.id)) }
+                setOnLongClickListener { sketchMenu(sketch); true }
+            }
+            row.addView(label(this, sketch.title, ui, 19f, bold = true, serif = true))
+            row.addView(label(this, "${sketch.pageCount} pages · page ${sketch.currentPage + 1}", ui, 13f, ui.muted))
+            list.addView(row, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply {
+                topMargin = dp(12)
+            })
+        }
+        scroll.addView(list)
+        content.addView(scroll)
+    }
+
+    private fun createSketchbook() {
+        val input = EditText(this).apply { setSingleLine(); hint = "Sketchbook name" }
+        dialog(this, settings.dark).setTitle("New sketchbook · 350 pages").setView(input)
+            .setNegativeButton("Cancel", null).setPositiveButton("Create") { _, _ ->
+                val title = input.text.toString().trim().ifEmpty { "Untitled sketchbook" }
+                scope.launch {
+                    val id = withContext(Db.io) { sketches.create(title) }
+                    reload()
+                    startActivity(SketchActivity.intent(this@LibraryActivity, id))
+                }
+            }.show()
+    }
+
+    private fun sketchMenu(sketch: Sketchbook) {
+        dialog(this, settings.dark).setTitle(sketch.title)
+            .setItems(arrayOf("Open", "Rename", "Delete")) { _, choice ->
+                when (choice) {
+                    0 -> startActivity(SketchActivity.intent(this, sketch.id))
+                    1 -> {
+                        val input = EditText(this).apply { setSingleLine(); setText(sketch.title); selectAll() }
+                        dialog(this, settings.dark).setTitle("Rename sketchbook").setView(input)
+                            .setNegativeButton("Cancel", null).setPositiveButton("Save") { _, _ ->
+                                val name = input.text.toString().trim()
+                                if (name.isNotEmpty()) scope.launch { withContext(Db.io) { sketches.rename(sketch.id, name) }; reload() }
+                            }.show()
+                    }
+                    2 -> dialog(this, settings.dark).setMessage("Delete “${sketch.title}” and all its pages, drawings and references?")
+                        .setNegativeButton("Cancel", null).setPositiveButton("Delete") { _, _ ->
+                            scope.launch { withContext(Db.io) { sketches.delete(sketch.id) }; reload() }
+                        }.show()
+                }
+            }.show()
     }
 
     private fun emptyView(title: String, body: String): View = LinearLayout(this).apply {
@@ -252,13 +326,14 @@ class LibraryActivity : Activity() {
 
     private fun reload() {
         scope.launch {
-            val (b, e) = withContext(Db.io) { app.db.books() to app.db.allExcerpts() }
+            val (b, e, s) = withContext(Db.io) { Triple(app.db.books(), app.db.allExcerpts(), sketches.list()) }
             books = when (sortMode) {
                 1 -> b.sortedBy { it.title.lowercase() }
                 2 -> b.sortedWith(compareBy({ it.author.lowercase() }, { it.title.lowercase() }))
                 else -> b
             }
             excerpts = e
+            sketchbooks = s
             showTab()
             bookAdapter.notifyDataSetChanged()
             excerptAdapter.notifyDataSetChanged()

@@ -38,6 +38,7 @@ jobs:
       # A fixed "latest" release, so the newest APK is always at the same link:
       # https://github.com/<owner>/<repo>/releases/download/latest/E-Reader.apk
       - name: Publish to the "latest" release
+        if: github.ref_name == github.event.repository.default_branch
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
