@@ -55,6 +55,12 @@
             android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboardHidden|density|uiMode" />
 
         <activity
+            android:name=".sketch.SketchActivity"
+            android:exported="false"
+            android:theme="@style/Theme.EReader.Reader"
+            android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboardHidden|density|uiMode" />
+
+        <activity
             android:name=".CrashActivity"
             android:exported="false"
             android:process=":crash"
