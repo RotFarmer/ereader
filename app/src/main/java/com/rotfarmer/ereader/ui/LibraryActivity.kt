@@ -280,7 +280,9 @@ class LibraryActivity : Activity() {
     }
 
     private fun createSketchbook() {
-        val input = EditText(this).apply { setSingleLine(); hint = "Sketchbook name" }
+        val input = EditText(this).apply {
+            setSingleLine(); setTextColor(ui.fg); setHintTextColor(ui.muted); hint = "Sketchbook name"
+        }
         dialog(this, settings.dark).setTitle("New sketchbook · 350 pages").setView(input)
             .setNegativeButton("Cancel", null).setPositiveButton("Create") { _, _ ->
                 val title = input.text.toString().trim().ifEmpty { "Untitled sketchbook" }
@@ -298,7 +300,10 @@ class LibraryActivity : Activity() {
                 when (choice) {
                     0 -> startActivity(SketchActivity.intent(this, sketch.id))
                     1 -> {
-                        val input = EditText(this).apply { setSingleLine(); setText(sketch.title); selectAll() }
+                        val input = EditText(this).apply {
+                            setSingleLine(); setTextColor(ui.fg); setHintTextColor(ui.muted)
+                            setText(sketch.title); selectAll()
+                        }
                         dialog(this, settings.dark).setTitle("Rename sketchbook").setView(input)
                             .setNegativeButton("Cancel", null).setPositiveButton("Save") { _, _ ->
                                 val name = input.text.toString().trim()
@@ -819,9 +824,9 @@ class LibraryActivity : Activity() {
             val paperH = paperW / 0.707f
             val top = (height - paperH) / 2f
             val r = android.graphics.RectF(dp(1).toFloat(), top, w - dp(1), top + paperH)
-            SketchPaper.draw(canvas, r, preview?.paper ?: 0, resources.displayMetrics.density)
+            SketchPaper.draw(canvas, r, preview?.paper ?: 0, resources.displayMetrics.density, settings.dark)
             val page = preview ?: return
-            painter.dark = false
+            painter.dark = settings.dark
             painter.sensitivity = settings.pressure
             canvas.save()
             canvas.clipRect(r)

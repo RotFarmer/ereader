@@ -11,6 +11,7 @@ import android.view.View
 import android.widget.GridLayout
 import android.widget.LinearLayout
 import com.rotfarmer.ereader.data.Settings
+import com.rotfarmer.ereader.ink.InkColors
 import com.rotfarmer.ereader.ink.InkPainter
 import com.rotfarmer.ereader.ink.Tools
 import kotlin.math.PI
@@ -167,7 +168,11 @@ class PenToolbar(ctx: Context, private val c: UiColors, private val settings: Se
 
     private fun currentColor(): Int {
         val t = settings.tool
-        return if (t == Tools.ERASER) c.muted else settings.toolColor(t)
+        return when (t) {
+            Tools.ERASER -> c.muted
+            Tools.HIGHLIGHTER -> settings.toolColor(t)
+            else -> InkColors.display(settings.toolColor(t), c.dark)
+        }
     }
 
     private fun sep() = View(context).apply {

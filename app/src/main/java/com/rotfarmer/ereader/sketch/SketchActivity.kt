@@ -243,7 +243,10 @@ class SketchActivity : Activity(), PenToolbar.Callbacks {
     }
 
     private fun rename() {
-        val input = android.widget.EditText(this).apply { setSingleLine(); setText(book?.title ?: ""); selectAll() }
+        val input = android.widget.EditText(this).apply {
+            setSingleLine(); setTextColor(ui.fg); setHintTextColor(ui.muted)
+            setText(book?.title ?: ""); selectAll()
+        }
         dialog(this, settings.dark).setTitle("Rename sketchbook").setView(input)
             .setNegativeButton("Cancel", null).setPositiveButton("Save") { _, _ ->
                 val name = input.text.toString().trim()
@@ -253,7 +256,7 @@ class SketchActivity : Activity(), PenToolbar.Callbacks {
 
     private fun addPagesDialog() {
         val input = android.widget.EditText(this).apply {
-            inputType = android.text.InputType.TYPE_CLASS_NUMBER; setText("50")
+            inputType = android.text.InputType.TYPE_CLASS_NUMBER; setTextColor(ui.fg); setHintTextColor(ui.muted); setText("50")
         }
         dialog(this, settings.dark).setTitle("Add pages").setView(input)
             .setNegativeButton("Cancel", null).setPositiveButton("Add") { _, _ ->
@@ -264,7 +267,7 @@ class SketchActivity : Activity(), PenToolbar.Callbacks {
 
     private fun goToPage() {
         val input = android.widget.EditText(this).apply {
-            inputType = android.text.InputType.TYPE_CLASS_NUMBER; setText("${pageIndex + 1}")
+            inputType = android.text.InputType.TYPE_CLASS_NUMBER; setTextColor(ui.fg); setHintTextColor(ui.muted); setText("${pageIndex + 1}")
         }
         dialog(this, settings.dark).setTitle("Go to page").setView(input)
             .setNegativeButton("Cancel", null).setPositiveButton("Go") { _, _ ->
@@ -411,6 +414,7 @@ class SketchActivity : Activity(), PenToolbar.Callbacks {
         val paperRect = RectF()
         private val painter = InkPainter()
         private val paint = Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG)
+        private val darkReferenceFilter = ReaderColors(true).dimFilter
         private val bitmaps = HashMap<Long, Bitmap>()
         private var bitmapGeneration = 0
         private var live = FloatArray(3 * 128)
@@ -460,13 +464,15 @@ class SketchActivity : Activity(), PenToolbar.Callbacks {
             val left = (width - pageW) / 2
             val top = (height - pageH) / 2
             paperRect.set(left, top, left + pageW, top + pageH)
-            SketchPaper.draw(c, paperRect, page.paper, resources.displayMetrics.density)
+            SketchPaper.draw(c, paperRect, page.paper, resources.displayMetrics.density, settings.dark)
             for (ref in page.references) {
                 val b = bitmaps[ref.id] ?: continue
                 paint.alpha = (ref.opacity * 255).toInt().coerceIn(0, 255)
                 paint.style = Paint.Style.FILL
+                paint.colorFilter = if (settings.dark) darkReferenceFilter else null
                 c.drawBitmap(b, null, RectF(left + ref.x * pageW, top + ref.y * pageW,
                     left + (ref.x + ref.width) * pageW, top + (ref.y + ref.height) * pageW), paint)
+                paint.colorFilter = null
                 if (arranging && selectedRef == ref.id) {
                     paint.alpha = 255; paint.color = ui.fg; paint.style = Paint.Style.STROKE; paint.strokeWidth = dp(2).toFloat()
                     c.drawRect(RectF(left + ref.x * pageW, top + ref.y * pageW,
@@ -474,7 +480,7 @@ class SketchActivity : Activity(), PenToolbar.Callbacks {
                 }
             }
             c.save(); c.clipRect(paperRect)
-            painter.dark = false; painter.sensitivity = settings.pressure
+            painter.dark = settings.dark; painter.sensitivity = settings.pressure
             val placement = Placement(left, top, pageW, null)
             page.strokes.forEach { painter.draw(c, it, placement) }
             if (liveCount > 0 && !erasing) painter.drawLive(c, live, liveCount,

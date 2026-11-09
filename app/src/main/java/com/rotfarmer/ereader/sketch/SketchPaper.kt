@@ -9,13 +9,13 @@ import android.graphics.RectF
 object SketchPaper {
     private val paint = Paint(Paint.ANTI_ALIAS_FLAG)
 
-    fun draw(canvas: Canvas, rect: RectF, style: Int, density: Float) {
+    fun draw(canvas: Canvas, rect: RectF, style: Int, density: Float, dark: Boolean) {
         paint.style = Paint.Style.FILL
         paint.alpha = 255
-        paint.color = Color.WHITE
+        paint.color = if (dark) 0xFF202020.toInt() else Color.WHITE
         canvas.drawRect(rect, paint)
         val step = rect.width() / 24f
-        paint.color = 0xFFD8DFDF.toInt()
+        paint.color = if (dark) 0xFF3B4141.toInt() else 0xFFD8DFDF.toInt()
         paint.strokeWidth = (0.8f * density).coerceAtLeast(0.5f)
         paint.style = Paint.Style.STROKE
         if (style == 1 || style == 2) {
@@ -36,7 +36,7 @@ object SketchPaper {
             }
         }
         paint.style = Paint.Style.STROKE
-        paint.color = 0xFFBFC5C0.toInt()
+        paint.color = if (dark) 0xFF555A58.toInt() else 0xFFBFC5C0.toInt()
         paint.strokeWidth = (1f * density).coerceAtLeast(0.5f)
         canvas.drawRect(rect, paint)
     }

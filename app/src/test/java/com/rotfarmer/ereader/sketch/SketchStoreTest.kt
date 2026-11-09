@@ -2,10 +2,12 @@ package com.rotfarmer.ereader.sketch
 
 import com.rotfarmer.ereader.ink.Anchor
 import com.rotfarmer.ereader.ink.InkStroke
+import com.rotfarmer.ereader.ink.InkColors
 import com.rotfarmer.ereader.ink.Tools
 import com.rotfarmer.ereader.doc.EpubParser
 import com.rotfarmer.ereader.doc.TextBlock
 import android.graphics.Bitmap
+import android.graphics.Color
 import android.net.Uri
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -17,6 +19,11 @@ import org.robolectric.RuntimeEnvironment
 
 @RunWith(RobolectricTestRunner::class)
 class SketchStoreTest {
+    @Test fun darkInkIsReadableWithoutChangingStoredColor() {
+        assertTrue(Color.red(InkColors.display(Color.BLACK, true)) > 128)
+        assertEquals(Color.BLACK, InkColors.display(Color.BLACK, false))
+    }
+
     @Test fun sparsePagesPersistAcrossReopenAndReferenceRemovalKeepsInk() {
         val ctx = RuntimeEnvironment.getApplication()
         var store = SketchStore(ctx)
