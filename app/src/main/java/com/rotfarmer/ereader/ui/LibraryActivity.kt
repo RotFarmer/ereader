@@ -29,7 +29,6 @@ import android.widget.GridView
 import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.ListView
-import android.widget.ScrollView
 import android.widget.TextView
 import android.widget.Toast
 import com.rotfarmer.ereader.App
@@ -44,6 +43,10 @@ import com.rotfarmer.ereader.render.ReaderColors
 import com.rotfarmer.ereader.sketch.SketchActivity
 import com.rotfarmer.ereader.sketch.SketchStore
 import com.rotfarmer.ereader.sketch.Sketchbook
+import com.rotfarmer.ereader.sketch.SketchPage
+import com.rotfarmer.ereader.sketch.SketchPaper
+import com.rotfarmer.ereader.ink.InkPainter
+import com.rotfarmer.ereader.ink.Placement
 import com.rotfarmer.ereader.update.UpdateException
 import com.rotfarmer.ereader.update.Updater
 import android.provider.Settings as AndroidSettings
@@ -60,6 +63,10 @@ import java.io.File
 import java.util.concurrent.Executors
 
 class LibraryActivity : Activity() {
+    private data class LibraryData(
+        val books: List<Book>, val excerpts: List<Excerpt>, val sketches: List<Sketchbook>,
+        val previews: Map<Long, SketchPage>
+    )
     private lateinit var app: App
     private val settings get() = app.settings
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
@@ -72,9 +79,11 @@ class LibraryActivity : Activity() {
     private var excerpts: List<Excerpt> = emptyList()
     private val sketches by lazy { SketchStore(this) }
     private var sketchbooks: List<Sketchbook> = emptyList()
+    private var sketchPreviews: Map<Long, SketchPage> = emptyMap()
     private var sortMode = 0
     private val bookAdapter = BookAdapter()
     private val excerptAdapter = ExcerptAdapter()
+    private val sketchAdapter = SketchAdapter()
 
     private val covers = object : LruCache<String, Bitmap>((Runtime.getRuntime().maxMemory() / 10).toInt()) {
         override fun sizeOf(key: String, value: Bitmap) = value.byteCount
@@ -187,7 +196,7 @@ class LibraryActivity : Activity() {
         root.addView(header)
 
         val tabs = Segmented(this, listOf("Books", "Excerpts", "Sketchbooks"), settings.libraryTab.coerceIn(0, 2), ui) {
-            settings.libraryTab = it; showTab()
+            settings.libraryTab = it; showTab(); if (it == 2) reload()
         }
         root.addView(tabs, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply {
             leftMargin = dp(20); rightMargin = dp(20); topMargin = dp(6); bottomMargin = dp(10)
@@ -250,35 +259,24 @@ class LibraryActivity : Activity() {
     }
 
     private fun showSketchbooks() {
-        val scroll = ScrollView(this)
-        val list = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            setPadding(dp(20), dp(12), dp(20), dp(24))
-        }
-        list.addView(TextButton(this, "New sketchbook", ui, filled = true).apply {
-            setOnClickListener { createSketchbook() }
-        })
         if (sketchbooks.isEmpty()) {
-            list.addView(label(this, "No sketchbooks yet. Create one to start drawing.", ui, 16f, ui.muted).apply {
-                setPadding(0, dp(24), 0, 0)
-            })
+            content.addView(emptyView("No sketchbooks yet", "Tap + to create a sketchbook with 350 pages."))
+            return
         }
-        for (sketch in sketchbooks) {
-            val row = LinearLayout(this).apply {
-                orientation = LinearLayout.VERTICAL
-                setPadding(dp(16), dp(14), dp(16), dp(14))
-                background = panelBg(this@LibraryActivity, ui, 8f)
-                setOnClickListener { startActivity(SketchActivity.intent(this@LibraryActivity, sketch.id)) }
-                setOnLongClickListener { sketchMenu(sketch); true }
-            }
-            row.addView(label(this, sketch.title, ui, 19f, bold = true, serif = true))
-            row.addView(label(this, "${sketch.pageCount} pages · page ${sketch.currentPage + 1}", ui, 13f, ui.muted))
-            list.addView(row, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply {
-                topMargin = dp(12)
-            })
+        val grid = GridView(this).apply {
+            numColumns = GridView.AUTO_FIT
+            columnWidth = dp(150)
+            stretchMode = GridView.STRETCH_COLUMN_WIDTH
+            horizontalSpacing = dp(14)
+            verticalSpacing = dp(18)
+            setPadding(dp(16), dp(14), dp(16), dp(24))
+            clipToPadding = false
+            selector = android.graphics.drawable.ColorDrawable(Color.TRANSPARENT)
+            adapter = sketchAdapter
+            setOnItemClickListener { _, _, pos, _ -> startActivity(SketchActivity.intent(this@LibraryActivity, sketchbooks[pos].id)) }
+            setOnItemLongClickListener { _, _, pos, _ -> sketchMenu(sketchbooks[pos]); true }
         }
-        scroll.addView(list)
-        content.addView(scroll)
+        content.addView(grid)
     }
 
     private fun createSketchbook() {
@@ -322,11 +320,19 @@ class LibraryActivity : Activity() {
         addView(label(this@LibraryActivity, title, ui, 20f, bold = true, serif = true).apply { gravity = Gravity.CENTER })
         addView(label(this@LibraryActivity, body, ui, 15f, ui.muted).apply { gravity = Gravity.CENTER; setPadding(0, dp(10), 0, dp(20)) })
         if (settings.libraryTab == 0) addView(TextButton(this@LibraryActivity, "Add books", ui, filled = true).apply { setOnClickListener { openPicker() } })
+        if (settings.libraryTab == 2) addView(TextButton(this@LibraryActivity, "New sketchbook", ui, filled = true).apply { setOnClickListener { createSketchbook() } })
     }
 
     private fun reload() {
         scope.launch {
-            val (b, e, s) = withContext(Db.io) { Triple(app.db.books(), app.db.allExcerpts(), sketches.list()) }
+            val (b, e, s, previews) = withContext(Db.io) {
+                val b = app.db.books(); val e = app.db.allExcerpts(); val s = sketches.list()
+                val p = if (settings.libraryTab == 2) s.associate { sketch ->
+                    sketch.id to runCatching { sketches.page(sketch.id, sketch.currentPage) }
+                        .getOrDefault(SketchPage(0, emptyList(), emptyList()))
+                } else emptyMap()
+                LibraryData(b, e, s, p)
+            }
             books = when (sortMode) {
                 1 -> b.sortedBy { it.title.lowercase() }
                 2 -> b.sortedWith(compareBy({ it.author.lowercase() }, { it.title.lowercase() }))
@@ -334,9 +340,11 @@ class LibraryActivity : Activity() {
             }
             excerpts = e
             sketchbooks = s
+            sketchPreviews = previews
             showTab()
             bookAdapter.notifyDataSetChanged()
             excerptAdapter.notifyDataSetChanged()
+            sketchAdapter.notifyDataSetChanged()
             checkCovers()
         }
     }
@@ -792,6 +800,59 @@ class LibraryActivity : Activity() {
             canvas.drawRect(0f, 0f, width.toFloat(), height.toFloat(), p)
             p.color = fg
             canvas.drawRect(0f, 0f, width * progress, height.toFloat(), p)
+        }
+    }
+
+    private inner class SketchCoverView(ctx: Context) : View(ctx) {
+        var preview: SketchPage? = null
+            set(value) { field = value; invalidate() }
+        private val painter = InkPainter()
+
+        override fun onMeasure(widthMeasureSpec: Int, heightMeasureSpec: Int) {
+            val w = MeasureSpec.getSize(widthMeasureSpec)
+            setMeasuredDimension(w, (w * 1.5f).toInt())
+        }
+
+        override fun onDraw(canvas: Canvas) {
+            val w = width.toFloat()
+            val paperW = w - dp(2)
+            val paperH = paperW / 0.707f
+            val top = (height - paperH) / 2f
+            val r = android.graphics.RectF(dp(1).toFloat(), top, w - dp(1), top + paperH)
+            SketchPaper.draw(canvas, r, preview?.paper ?: 0, resources.displayMetrics.density)
+            val page = preview ?: return
+            painter.dark = false
+            painter.sensitivity = settings.pressure
+            canvas.save()
+            canvas.clipRect(r)
+            val placement = Placement(r.left, r.top, r.width(), null)
+            page.strokes.take(200).forEach { painter.draw(canvas, it, placement) }
+            canvas.restore()
+        }
+    }
+
+    private inner class SketchAdapter : BaseAdapter() {
+        override fun getCount() = sketchbooks.size
+        override fun getItem(position: Int) = sketchbooks[position]
+        override fun getItemId(position: Int) = sketchbooks[position].id
+
+        override fun getView(position: Int, convertView: View?, parent: ViewGroup?): View {
+            val sketch = sketchbooks[position]
+            val cell = (convertView as? LinearLayout) ?: LinearLayout(this@LibraryActivity).apply {
+                orientation = LinearLayout.VERTICAL
+                layoutParams = AbsListView.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
+                addView(SketchCoverView(context))
+                addView(ProgressLine(context, ui.fg, ui.hairline), LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(3)).apply { topMargin = dp(6) })
+                addView(label(context, "", ui, 14.5f, serif = true).apply {
+                    maxLines = 2; ellipsize = TextUtils.TruncateAt.END; setPadding(0, dp(6), 0, 0)
+                })
+                addView(label(context, "", ui, 12f, ui.muted).apply { maxLines = 1 })
+            }
+            (cell.getChildAt(0) as SketchCoverView).preview = sketchPreviews[sketch.id]
+            (cell.getChildAt(1) as ProgressLine).apply { progress = (sketch.currentPage + 1f) / sketch.pageCount; invalidate() }
+            (cell.getChildAt(2) as TextView).text = sketch.title
+            (cell.getChildAt(3) as TextView).text = "Page ${sketch.currentPage + 1} · ${sketch.pageCount} pages"
+            return cell
         }
     }
 

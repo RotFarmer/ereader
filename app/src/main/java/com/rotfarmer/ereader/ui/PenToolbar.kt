@@ -76,7 +76,8 @@ class PenSample(ctx: Context, var tool: Int, var color: Int, var widthDp: Float,
  * Tapping the selected pen again opens its color and width options.
  */
 @SuppressLint("ViewConstructor")
-class PenToolbar(ctx: Context, private val c: UiColors, private val settings: Settings, private val cb: Callbacks) : LinearLayout(ctx) {
+class PenToolbar(ctx: Context, private val c: UiColors, private val settings: Settings, private val cb: Callbacks,
+                 private val showInsertSpace: Boolean = true) : LinearLayout(ctx) {
     interface Callbacks {
         fun onToolChanged()
         fun onToolOptions(anchor: View)
@@ -131,15 +132,17 @@ class PenToolbar(ctx: Context, private val c: UiColors, private val settings: Se
         for (t in Tools.DRAWING) addView(sample(t))
         addView(sample(Tools.ERASER))
         addView(sep())
-        insertBtn = IconButton(context, "", c, 44).apply {
-            active = insertArmed
-            contentDescription = "Insert writing space"
-            setOnClickListener {
-                insertArmed = !insertArmed
-                cb.onInsertSpace(insertArmed)
+        if (showInsertSpace) {
+            insertBtn = IconButton(context, "", c, 44).apply {
+                active = insertArmed
+                contentDescription = "Insert writing space"
+                setOnClickListener {
+                    insertArmed = !insertArmed
+                    cb.onInsertSpace(insertArmed)
+                }
             }
+            addView(insertBtn)
         }
-        addView(insertBtn)
         colorDot = ColorDot(context, currentColor(), c).apply {
             layoutParams = LayoutParams(dp(44), dp(40))
             contentDescription = "Color and size"

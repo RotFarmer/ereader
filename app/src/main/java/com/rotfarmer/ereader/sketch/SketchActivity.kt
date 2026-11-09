@@ -14,6 +14,7 @@ import android.view.Gravity
 import android.view.MotionEvent
 import android.view.View
 import android.view.ViewGroup
+import android.view.WindowInsets
 import android.widget.FrameLayout
 import android.widget.LinearLayout
 import android.widget.SeekBar
@@ -43,6 +44,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.File
 import kotlin.math.hypot
+import kotlin.math.abs
 
 /** Full page S Pen canvas. Only the open page and its reference bitmaps are loaded. */
 class SketchActivity : Activity(), PenToolbar.Callbacks {
@@ -56,10 +58,16 @@ class SketchActivity : Activity(), PenToolbar.Callbacks {
     private var pageIndex = 0
     private var page = SketchPage(0, emptyList(), emptyList())
     private var generation = 0
-    private lateinit var root: LinearLayout
+    private lateinit var root: FrameLayout
     private lateinit var canvas: SketchCanvasView
     private lateinit var pageLabel: TextView
+    private lateinit var pageHint: TextView
     private lateinit var titleLabel: TextView
+    private lateinit var topBar: LinearLayout
+    private lateinit var bottomBar: LinearLayout
+    private lateinit var arrangeDone: TextButton
+    private var penToggle: IconButton? = null
+    private var chromeVisible = false
     private var toolbar: PenToolbar? = null
     private val undo = ArrayDeque<InkEdit>()
     private val redo = ArrayDeque<InkEdit>()
@@ -101,55 +109,83 @@ class SketchActivity : Activity(), PenToolbar.Callbacks {
     private fun build() {
         if (::canvas.isInitialized) canvas.dispose()
         val colors = ui
-        root = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
+        root = FrameLayout(this).apply {
             setBackgroundColor(ReaderColors(settings.dark).paper)
+            setOnApplyWindowInsetsListener { view, insets ->
+                view.setPadding(0, 0, 0, insets.getInsets(WindowInsets.Type.navigationBars()).bottom)
+                insets
+            }
         }
-        val header = LinearLayout(this).apply { gravity = Gravity.CENTER_VERTICAL; setPadding(dp(8), dp(4), dp(8), dp(4)) }
-        header.addView(IconButton(this, Icons.BACK, colors).apply { contentDescription = "Back to library"; setOnClickListener { finish() } })
-        titleLabel = label(this, book!!.title, colors, 20f, bold = true, serif = true).apply { maxLines = 1 }
-        header.addView(titleLabel, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
-        header.addView(IconButton(this, Icons.LIBRARY_ADD, colors).apply {
-            contentDescription = "Import a reference"
-            setOnClickListener { pickReference() }
-        })
-        header.addView(IconButton(this, Icons.MORE, colors).apply {
-            contentDescription = "Sketchbook options"
-            setOnClickListener { options() }
-        })
-        root.addView(header)
-
-        val actions = LinearLayout(this).apply { gravity = Gravity.CENTER_VERTICAL; setPadding(dp(12), 0, dp(12), dp(4)) }
-        actions.addView(TextButton(this, "Paper", colors).apply { setOnClickListener { choosePaper() } })
-        actions.addView(TextButton(this, "Layers", colors).apply { setOnClickListener { layers() } },
-            LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { leftMargin = dp(8) })
-        actions.addView(TextButton(this, "Import", colors).apply { setOnClickListener { pickReference() } },
-            LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { leftMargin = dp(8) })
-        root.addView(actions)
-
-        val frame = FrameLayout(this)
         canvas = SketchCanvasView()
-        frame.addView(canvas, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
-        toolbar = PenToolbar(this, colors, settings, this).apply { visibility = if (settings.toolbarVisible) View.VISIBLE else View.GONE }
-        frame.addView(toolbar, FrameLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT,
-            Gravity.CENTER_VERTICAL or if (settings.toolbarRight) Gravity.END else Gravity.START))
-        root.addView(frame, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f))
+        root.addView(canvas, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
+        toolbar = PenToolbar(this, colors, settings, this, showInsertSpace = false).apply { visibility = if (settings.toolbarVisible) View.VISIBLE else View.GONE }
+        root.addView(toolbar, FrameLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT,
+            Gravity.CENTER_VERTICAL or if (settings.toolbarRight) Gravity.END else Gravity.START).apply {
+            marginStart = dp(6); marginEnd = dp(6)
+        })
 
+        topBar = LinearLayout(this).apply {
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(dp(6), 0, dp(6), 0)
+            setBackgroundColor(colors.bg)
+            visibility = if (chromeVisible) View.VISIBLE else View.GONE
+        }
+        topBar.addView(IconButton(this, Icons.BACK, colors).apply { contentDescription = "Back to library"; setOnClickListener { finish() } })
+        titleLabel = label(this, book!!.title, colors, 17f, serif = true).apply { maxLines = 1; ellipsize = android.text.TextUtils.TruncateAt.END; setPadding(dp(8), 0, dp(8), 0) }
+        topBar.addView(titleLabel, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+        arrangeDone = TextButton(this, "Done", colors).apply {
+            visibility = if (arranging) View.VISIBLE else View.GONE
+            setOnClickListener { arranging = false; selectedRef = -1L; visibility = View.GONE; canvas.invalidate(); showChrome(false) }
+        }
+        topBar.addView(arrangeDone)
+        topBar.addView(IconButton(this, Icons.STORIES, colors).apply { contentDescription = "Reference layers"; setOnClickListener { layers() } })
+        topBar.addView(IconButton(this, Icons.LIBRARY_ADD, colors).apply { contentDescription = "Import a reference"; setOnClickListener { pickReference() } })
+        penToggle = IconButton(this, Icons.DRAW, colors).apply {
+            contentDescription = "Show or hide pen tools"
+            active = settings.toolbarVisible
+            setOnClickListener { settings.toolbarVisible = !settings.toolbarVisible; active = settings.toolbarVisible; toolbar?.visibility = if (settings.toolbarVisible) View.VISIBLE else View.GONE }
+        }
+        topBar.addView(penToggle)
+        topBar.addView(IconButton(this, Icons.MORE, colors).apply { contentDescription = "Sketchbook options"; setOnClickListener { options() } })
+        root.addView(topBar, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(56), Gravity.TOP))
+
+        bottomBar = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setBackgroundColor(colors.bg)
+            visibility = if (chromeVisible) View.VISIBLE else View.GONE
+        }
+        bottomBar.addView(View(this).apply { setBackgroundColor(colors.line) }, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(1)))
         val nav = LinearLayout(this).apply { gravity = Gravity.CENTER_VERTICAL; setPadding(dp(12), dp(4), dp(12), dp(8)) }
         nav.addView(IconButton(this, Icons.CHEV_LEFT, colors).apply { contentDescription = "Previous page"; setOnClickListener { turn(-1) } })
         pageLabel = label(this, "", colors, 15f, bold = true).apply { gravity = Gravity.CENTER; setOnClickListener { goToPage() } }
         nav.addView(pageLabel, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
         nav.addView(IconButton(this, Icons.CHEV_RIGHT, colors).apply { contentDescription = "Next page"; setOnClickListener { turn(1) } })
         nav.addView(IconButton(this, Icons.ADD, colors).apply { contentDescription = "Add pages"; setOnClickListener { addPagesDialog() } })
-        root.addView(nav)
+        bottomBar.addView(nav)
+        root.addView(bottomBar, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT, Gravity.BOTTOM))
+        pageHint = label(this, "", colors, 13f, colors.muted).apply {
+            gravity = Gravity.CENTER
+            setPadding(0, dp(8), 0, dp(10))
+            visibility = if (chromeVisible) View.GONE else View.VISIBLE
+            setOnClickListener { showChrome(true) }
+        }
+        root.addView(pageHint, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT, Gravity.BOTTOM))
         setContentView(root)
         updateLabels()
+    }
+
+    private fun showChrome(show: Boolean) {
+        chromeVisible = show
+        topBar.visibility = if (show) View.VISIBLE else View.GONE
+        bottomBar.visibility = if (show) View.VISIBLE else View.GONE
+        pageHint.visibility = if (show) View.GONE else View.VISIBLE
     }
 
     private fun updateLabels() {
         book = store.get(bookId) ?: return
         titleLabel.text = book!!.title
         pageLabel.text = "${pageIndex + 1} / ${book!!.pageCount}"
+        pageHint.text = "${pageIndex + 1} / ${book!!.pageCount}"
         toolbar?.setUndoState(undo.isNotEmpty(), redo.isNotEmpty())
     }
 
@@ -161,8 +197,10 @@ class SketchActivity : Activity(), PenToolbar.Callbacks {
         canvas.setPage(page)
         selectedRef = -1L
         arranging = false
+        arrangeDone.visibility = View.GONE
         undo.clear(); redo.clear()
         updateLabels()
+        showChrome(false)
         scope.launch {
             try {
                 val loaded = withContext(Dispatchers.IO) { store.page(bookId, current) }
@@ -199,8 +237,8 @@ class SketchActivity : Activity(), PenToolbar.Callbacks {
     }
 
     private fun options() {
-        dialog(this, settings.dark).setItems(arrayOf("Rename sketchbook", "Go to page", "Add pages", "Show pen toolbar")) { _, choice ->
-            when (choice) { 0 -> rename(); 1 -> goToPage(); 2 -> addPagesDialog(); 3 -> { toolbar?.visibility = View.VISIBLE; settings.toolbarVisible = true } }
+        dialog(this, settings.dark).setItems(arrayOf("Paper for this page", "Reference layers", "Import reference", "Rename sketchbook", "Go to page", "Add pages")) { _, choice ->
+            when (choice) { 0 -> choosePaper(); 1 -> layers(); 2 -> pickReference(); 3 -> rename(); 4 -> goToPage(); 5 -> addPagesDialog() }
         }.show()
     }
 
@@ -279,13 +317,13 @@ class SketchActivity : Activity(), PenToolbar.Callbacks {
         dialog(this, settings.dark).setTitle("Reference layer")
             .setItems(arrayOf("Move and scale", "Opacity", "Remove reference")) { _, choice ->
                 when (choice) {
-                    0 -> { arranging = true; selectedRef = id; canvas.invalidate(); Toast.makeText(this, "Drag with a finger to move; pinch to scale. S Pen still draws.", Toast.LENGTH_LONG).show() }
+                    0 -> { arranging = true; selectedRef = id; arrangeDone.visibility = View.VISIBLE; showChrome(true); canvas.invalidate(); Toast.makeText(this, "Drag with a finger to move; pinch to scale. S Pen still draws.", Toast.LENGTH_LONG).show() }
                     1 -> opacity(ref)
                     2 -> dialog(this, settings.dark).setMessage("Remove this reference? Your drawing stays on the page.")
                         .setNegativeButton("Cancel", null).setPositiveButton("Remove") { _, _ ->
                             store.removeReference(bookId, ref)
                             page = page.copy(references = page.references.filterNot { it.id == id })
-                            selectedRef = -1L; arranging = false; canvas.setPage(page)
+                            selectedRef = -1L; arranging = false; arrangeDone.visibility = View.GONE; canvas.setPage(page)
                         }.show()
                 }
             }.show()
@@ -367,7 +405,7 @@ class SketchActivity : Activity(), PenToolbar.Callbacks {
     override fun onInsertSpace(armed: Boolean) { toolbar?.insertArmed = false }
     override fun onSideChanged() { build(); canvas.setPage(page) }
     override fun onExpandedChanged() { toolbar?.setUndoState(undo.isNotEmpty(), redo.isNotEmpty()) }
-    override fun onHide() { toolbar?.visibility = View.GONE; settings.toolbarVisible = false }
+    override fun onHide() { toolbar?.visibility = View.GONE; settings.toolbarVisible = false; penToggle?.active = false; showChrome(true) }
 
     private inner class SketchCanvasView : View(this@SketchActivity) {
         val paperRect = RectF()
@@ -385,6 +423,9 @@ class SketchActivity : Activity(), PenToolbar.Callbacks {
         private var pinchDistance = 0f
         private var pinchWidth = 0f
         private var pinchHeight = 0f
+        private var fingerDownX = 0f
+        private var fingerDownY = 0f
+        private var fingerMulti = false
 
         fun dispose() { bitmapGeneration++; bitmaps.values.forEach { it.recycle() }; bitmaps.clear() }
 
@@ -419,9 +460,7 @@ class SketchActivity : Activity(), PenToolbar.Callbacks {
             val left = (width - pageW) / 2
             val top = (height - pageH) / 2
             paperRect.set(left, top, left + pageW, top + pageH)
-            paint.style = Paint.Style.FILL; paint.color = Color.WHITE; paint.alpha = 255
-            c.drawRect(paperRect, paint)
-            drawPaper(c, page.paper)
+            SketchPaper.draw(c, paperRect, page.paper, resources.displayMetrics.density)
             for (ref in page.references) {
                 val b = bitmaps[ref.id] ?: continue
                 paint.alpha = (ref.opacity * 255).toInt().coerceIn(0, 255)
@@ -441,29 +480,6 @@ class SketchActivity : Activity(), PenToolbar.Callbacks {
             if (liveCount > 0 && !erasing) painter.drawLive(c, live, liveCount,
                 settings.tool, settings.toolColor(settings.tool), dp(settings.toolWidth(settings.tool)).toFloat())
             c.restore()
-        }
-
-        private fun drawPaper(c: Canvas, style: Int) {
-            if (style == 0) return
-            val step = paperRect.width() / 24f
-            paint.style = Paint.Style.STROKE; paint.strokeWidth = dp(0.6f).toFloat(); paint.color = 0xFFD8DFDF.toInt()
-            if (style == 1 || style == 2) {
-                var y = paperRect.top + step
-                while (y < paperRect.bottom) { c.drawLine(paperRect.left, y, paperRect.right, y, paint); y += step }
-            }
-            if (style == 2) {
-                var x = paperRect.left + step
-                while (x < paperRect.right) { c.drawLine(x, paperRect.top, x, paperRect.bottom, paint); x += step }
-            }
-            if (style == 3) {
-                paint.style = Paint.Style.FILL
-                var x = paperRect.left + step
-                while (x < paperRect.right) {
-                    var y = paperRect.top + step
-                    while (y < paperRect.bottom) { c.drawCircle(x, y, dp(0.8f).toFloat(), paint); y += step }
-                    x += step
-                }
-            }
         }
 
         override fun onTouchEvent(e: MotionEvent): Boolean {
@@ -509,7 +525,18 @@ class SketchActivity : Activity(), PenToolbar.Callbacks {
                 }
                 return true
             }
-            if (!arranging) return true
+            if (!arranging) {
+                when (action) {
+                    MotionEvent.ACTION_DOWN -> { fingerDownX = e.x; fingerDownY = e.y; fingerMulti = false }
+                    MotionEvent.ACTION_POINTER_DOWN -> fingerMulti = true
+                    MotionEvent.ACTION_UP -> if (!fingerMulti) {
+                        val dx = e.x - fingerDownX; val dy = e.y - fingerDownY
+                        if (abs(dx) > dp(64) && abs(dx) > abs(dy) * 1.3f) turn(if (dx < 0) 1 else -1)
+                        else if (abs(dx) < dp(12) && abs(dy) < dp(12)) showChrome(!chromeVisible)
+                    }
+                }
+                return true
+            }
             val ref = page.references.firstOrNull { it.id == selectedRef }
             when (action) {
                 MotionEvent.ACTION_DOWN -> { dragX = e.x; dragY = e.y; return true }
