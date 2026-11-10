@@ -327,8 +327,11 @@ class SketchStore private constructor(context: Context) : SQLiteOpenHelper(conte
 
     /** Writes the whole sketchbook in the shared `.sketchbook` format. */
     fun write(id: String, out: OutputStream) {
-        val meta = meta(id) ?: throw IOException("Sketchbook missing")
         val items = readableDatabase.rawQuery("SELECT $itemCols FROM items WHERE book = ?", arrayOf(id)).use { c -> buildList { while (c.moveToNext()) add(item(c, id)) } }
+        val used = readableDatabase.rawQuery("SELECT MAX(page) FROM strokes WHERE book = ? AND deleted = 0", arrayOf(id)).use { c -> if (c.moveToFirst() && !c.isNull(0)) c.getInt(0) else -1 }
+        val stated = meta(id) ?: throw IOException("Sketchbook missing")
+        // Pages only grow; make sure the count covers everything written (a page may have been added meanwhile).
+        val meta = stated.copy(pages = maxOf(stated.pages, used + 1, (items.maxOfOrNull { it.page } ?: -1) + 1).coerceAtMost(SketchFile.MAX_PAGES))
         val assets = items.filter { it.deleted == 0L }.map { it.asset }.distinct().map { assetFile(it) }.filter { it.isFile }
             .map { f -> f.name to { f.inputStream() as InputStream } }
         SketchFile.write(out, meta, items = items, assets = assets, deleted = { emit ->
@@ -412,9 +415,12 @@ class SketchStore private constructor(context: Context) : SQLiteOpenHelper(conte
                     putItem(db, bookId, merged, SQLiteDatabase.CONFLICT_REPLACE)
                     changed += local.page; changed += merged.page
                 }
-                if (merged != remote) itemsBehind = true
+                if (!SketchMerge.sameItem(merged, remote)) itemsBehind = true
             }
         }, onAsset = { name, stream -> receiveAsset(name, stream) })
+        // A page drawn on (or given a picture) past the page count means the count grew there.
+        db.execSQL("""UPDATE books SET pages = MAX(pages, 1 + COALESCE((SELECT MAX(page) FROM strokes WHERE book = ?1 AND deleted = 0), -1),
+            1 + COALESCE((SELECT MAX(page) FROM items WHERE book = ?1 AND deleted = 0), -1)) WHERE id = ?1""", arrayOf<Any>(bookId))
         if (changed.isNotEmpty() || metaChanged) db.execSQL("UPDATE books SET updated = ? WHERE id = ?", arrayOf<Any>(System.currentTimeMillis(), bookId))
         // Does the file lack anything this device has? Then it needs writing back.
         val (live, gone) = db.rawQuery("SELECT SUM(deleted = 0), SUM(deleted > 0) FROM strokes WHERE book = ?", arrayOf(bookId)).use { c ->

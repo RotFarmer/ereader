@@ -62,12 +62,15 @@ class SketchView(context: Context, private val settings: Settings) : View(contex
     private var pressConsumed = false
     private val longPress = Runnable {
         val it = pressCandidate ?: return@Runnable
+        // Only a deliberate, still finger: not a palm (pen near), not a pinch, not while the pen draws.
+        if (!fActive || fIgnore || fMulti || (penPointer != -1 && !penIsFinger) || palmLikely()) return@Runnable
+        if (penIsFinger) resetPen() // with finger drawing on, the held finger was not a stroke
         pressConsumed = true
         performHapticFeedback(android.view.HapticFeedbackConstants.LONG_PRESS)
         select(it)
         listener?.onItemSelected(it)
-        // Keep dragging without lifting the finger.
-        dragMode = 1; dragStart = it
+        // Pictures can be dragged straight away; document pages stay put (they're the page's background).
+        if (it.kind == SketchItem.PICTURE) { dragMode = 1; dragStart = it }
     }
     /** Page width in pixels at normal zoom (for loading pictures at the right size). */
     val pageWidthPx: Float get() = if (fitW > 1f) fitW else resources.displayMetrics.widthPixels * 0.8f
@@ -232,6 +235,7 @@ class SketchView(context: Context, private val settings: Settings) : View(contex
         selectPaint.style = Paint.Style.STROKE
         c.drawRect(r, selectPaint)
         selectPaint.pathEffect = null
+        if (it.kind != SketchItem.PICTURE) return
         selectPaint.style = Paint.Style.FILL
         c.drawCircle(r.right, r.bottom, dp(9f), selectPaint)
         selectPaint.color = SketchRender.paperColor(dark)
@@ -277,6 +281,7 @@ class SketchView(context: Context, private val settings: Settings) : View(contex
         val tt = e.getToolType(0)
         if (tt == MotionEvent.TOOL_TYPE_STYLUS || tt == MotionEvent.TOOL_TYPE_ERASER) {
             lastStylusTime = SystemClock.uptimeMillis()
+            removeCallbacks(longPress)
             hoverX = e.x; hoverY = e.y
             hoverButton = (e.buttonState and MotionEvent.BUTTON_STYLUS_PRIMARY) != 0 || tt == MotionEvent.TOOL_TYPE_ERASER
             hovering = e.actionMasked != MotionEvent.ACTION_HOVER_EXIT
@@ -363,14 +368,14 @@ class SketchView(context: Context, private val settings: Settings) : View(contex
                 if (sel != null) {
                     // Drag the selected picture or its corner; touching elsewhere lets it go.
                     when {
-                        onHandle(sel, e.x, e.y) -> { dragMode = 2; dragStart = sel; pressConsumed = true; return true }
-                        itemRect(sel).contains(e.x, e.y) -> { dragMode = 1; dragStart = sel; pressConsumed = true; return true }
+                        sel.kind == SketchItem.PICTURE && onHandle(sel, e.x, e.y) -> { dragMode = 2; dragStart = sel; pressConsumed = true; return true }
+                        sel.kind == SketchItem.PICTURE && itemRect(sel).contains(e.x, e.y) -> { dragMode = 1; dragStart = sel; pressConsumed = true; return true }
                         else -> { select(null); listener?.onItemSelected(null) }
                     }
                 }
-                if (settings.fingerDraw) { startPen(e, 0, false, finger = true); return true }
                 pressCandidate = itemAt(e.x, e.y)
-                if (pressCandidate != null) postDelayed(longPress, 450)
+                if (pressCandidate != null) postDelayed(longPress, if (pressCandidate?.kind == SketchItem.DOCUMENT) 700L else 450L)
+                if (settings.fingerDraw) { startPen(e, 0, false, finger = true); return true }
             }
             MotionEvent.ACTION_POINTER_DOWN -> {
                 removeCallbacks(longPress)
@@ -380,7 +385,7 @@ class SketchView(context: Context, private val settings: Settings) : View(contex
             MotionEvent.ACTION_MOVE -> {
                 if (!fActive || fIgnore) return true
                 if (dragMode != 0) { dragTo(e.x, e.y); return true }
-                if (hypot(e.x - fDownX, e.y - fDownY) > slop) removeCallbacks(longPress)
+                if (hypot(e.x - fDownX, e.y - fDownY) > (if (zoom > 1.01f) dp(3f) else slop)) removeCallbacks(longPress)
                 if (fMulti && e.pointerCount >= 2) {
                     val d = hypot(e.getX(0) - e.getX(1), e.getY(0) - e.getY(1)).coerceAtLeast(1f)
                     val cx = (e.getX(0) + e.getX(1)) / 2; val cy = (e.getY(0) + e.getY(1)) / 2
@@ -446,6 +451,7 @@ class SketchView(context: Context, private val settings: Settings) : View(contex
         penPointer = e.getPointerId(idx)
         penIsFinger = finger
         if (!finger) {
+            removeCallbacks(longPress)
             lastStylusTime = SystemClock.uptimeMillis()
             hovering = false
             requestUnbufferedDispatch(e)
@@ -466,6 +472,7 @@ class SketchView(context: Context, private val settings: Settings) : View(contex
         val i = e.findPointerIndex(penPointer)
         if (i < 0) return
         if (!penIsFinger) lastStylusTime = SystemClock.uptimeMillis()
+        else if (hypot(e.getX(i) - fDownX, e.getY(i) - fDownY) > slop) removeCallbacks(longPress)
         if (!penErasing && !penIsFinger && liveCount <= 3 && (samsungButton || (e.buttonState and MotionEvent.BUTTON_STYLUS_PRIMARY) != 0)) penErasing = true
         for (h in 0 until e.historySize) {
             val x = e.getHistoricalX(i, h); val y = e.getHistoricalY(i, h)
@@ -487,6 +494,7 @@ class SketchView(context: Context, private val settings: Settings) : View(contex
     }
 
     private fun endPen() {
+        removeCallbacks(longPress)
         when {
             penErasing -> if (erasedNow.isNotEmpty()) listener?.onStrokesErased(ArrayList(erasedNow))
             liveCount > 0 -> commitStroke()

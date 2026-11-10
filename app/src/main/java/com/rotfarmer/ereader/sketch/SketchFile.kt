@@ -202,7 +202,7 @@ object SketchFile {
                         onDeleted(id, data.readLong())
                     }
                     name == STROKES -> {
-                        val pages = maxOf(meta!!.pages, 1)
+                        val pages = MAX_PAGES
                         while (true) {
                             val id = data.readLong(); if (id == 0L) break
                             val page = data.readInt(); val tool = data.readInt(); val color = data.readInt()
@@ -214,7 +214,7 @@ object SketchFile {
                         }
                     }
                     name == ITEMS -> {
-                        val pages = maxOf(meta!!.pages, 1)
+                        val pages = MAX_PAGES
                         while (true) {
                             val id = data.readLong(); if (id == 0L) break
                             val item = SketchItem(id, data.readInt(), data.readInt(), data.readUTF(), data.readInt(),
@@ -288,14 +288,18 @@ object SketchMerge {
     )
 
     /**
-     * One placed item seen on both sides. A removal is final (whichever side removed it);
-     * otherwise the more recent position wins (ties keep [local]).
+     * One placed item seen on both sides. A removal is final (whichever side removed it, the
+     * earliest removal is kept, so both sides agree); otherwise the more recent position wins
+     * (ties keep [local]).
      */
     fun item(local: SketchItem, remote: SketchItem): SketchItem = when {
-        local.deleted > 0 && remote.deleted > 0 -> if (remote.deleted < local.deleted) local.copy(deleted = remote.deleted) else local
+        local.deleted > 0 && remote.deleted > 0 -> if (remote.deleted < local.deleted) remote else local
         local.deleted > 0 -> local
-        remote.deleted > 0 -> local.copy(deleted = remote.deleted, time = maxOf(local.time, remote.time))
+        remote.deleted > 0 -> remote
         remote.time > local.time -> remote
         else -> local
     }
+
+    /** True if [a] and [b] say the same thing (for removed items, only when they were removed matters). */
+    fun sameItem(a: SketchItem, b: SketchItem): Boolean = if (a.deleted > 0 || b.deleted > 0) a.deleted == b.deleted else a == b
 }

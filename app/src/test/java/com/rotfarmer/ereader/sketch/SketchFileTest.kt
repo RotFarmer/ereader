@@ -66,7 +66,7 @@ class SketchFileTest {
     }
 
     @Test fun rejectsADamagedStroke() {
-        val broken = stroke(5, 0).let { SketchStrokeRecord(it.id, 9999, it.tool, it.color, it.width, it.created, it.pts) }
+        val broken = stroke(5, 0).let { SketchStrokeRecord(it.id, SketchFile.MAX_PAGES, it.tool, it.color, it.width, it.created, it.pts) }
         val bytes = write(meta, emptyList(), listOf(broken))
         try {
             SketchFile.read(ByteArrayInputStream(bytes), {}, { _, _ -> }, {})
@@ -108,6 +108,21 @@ class SketchFileTest {
         val removed = item(1, 15, deleted = 15)
         assertTrue(SketchMerge.item(moved, removed).deleted > 0)
         assertTrue(SketchMerge.item(removed, moved).deleted > 0)
+    }
+
+    @Test fun bothDevicesAgreeOnARemovalSoSyncSettles() {
+        // Removed on both devices at different times, or moved on one and removed on the other:
+        // either order of merging must give the same answer, or the devices would keep rewriting.
+        val a = item(1, 100, deleted = 100)
+        val b = item(1, 120, x = 0.6f, deleted = 120)
+        val moved = item(1, 130, x = 0.9f)
+        for ((x, y) in listOf(a to b, a to moved, b to moved)) {
+            val one = SketchMerge.item(x, y); val two = SketchMerge.item(y, x)
+            assertTrue(SketchMerge.sameItem(one, two))
+            // Merging again changes nothing.
+            assertTrue(SketchMerge.sameItem(SketchMerge.item(one, two), one))
+        }
+        assertEquals(100L, SketchMerge.item(b, a).deleted)
     }
 
     @Test fun newerSettingsWinAndPagesOnlyGrow() {

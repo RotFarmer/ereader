@@ -101,11 +101,18 @@ object SketchRender {
         val doc = PdfDocument()
         try {
             val painter = InkPainter()
+            // Android keeps every page's pictures until the whole PDF is written, so long exports
+            // use fewer pixels (about 150 dpi for a few pages, 100 dpi for many) and 16-bit colour.
+            val pictured = pages.count { store.items(bookId, it).isNotEmpty() }
+            val pagePx = if (pictured <= 40) 1240f else 830f
             pages.forEachIndexed { i, page ->
                 val p = doc.startPage(PdfDocument.PageInfo.Builder(595, 842, i + 1).create())
                 val items = store.items(bookId, page)
-                // About 150 dpi for pictures and document pages.
-                val pictures = items.associate { it.id to SketchAssets.render(store, it, (it.w * 1240).toInt()) }
+                val pictures = items.associate { item ->
+                    item.id to SketchAssets.render(store, item, (item.w * pagePx).toInt())?.let { full ->
+                        if (full.hasAlpha()) full else full.copy(Bitmap.Config.RGB_565, false).also { if (it != null) full.recycle() } ?: full
+                    }
+                }
                 try {
                     drawPage(p.canvas, 595f, book.paper, store.strokes(bookId, page), false, sensitivity, painter, 0.5f, items) { pictures[it.id] }
                     doc.finishPage(p)

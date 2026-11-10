@@ -290,6 +290,7 @@ class SketchActivity : Activity(), SketchView.Listener, PenToolbar.Callbacks {
             view.setPage(index, list)
             view.setItems(items)
             loadPictures(items)
+            if (items.isNotEmpty()) hasImports = true
             save { store.setCurrentPage(bookId, index) }
             updateTitle(); updateUndo(); refreshBar()
         }
@@ -430,14 +431,14 @@ class SketchActivity : Activity(), SketchView.Listener, PenToolbar.Callbacks {
         when {
             imp != null -> { text(imp.first); action("Cancel") { imp.second() } }
             sel != null && sel.kind == SketchItem.DOCUMENT -> {
-                text("Document page · drag to move")
-                action("Remove") { removeItem(sel) }
-                action("Remove whole document") { removeDocument(sel) }
+                text("Document page")
+                action("Remove") { view.selected?.let(::removeItem) }
+                action("Remove whole document") { view.selected?.let(::removeDocument) }
                 action("Done", filled = true) { view.select(null); refreshBar() }
             }
             sel != null -> {
                 text("Drag to move · drag the corner to resize")
-                action("Remove") { removeItem(sel) }
+                action("Remove") { view.selected?.let(::removeItem) }
                 action("Done", filled = true) { view.select(null); refreshBar() }
             }
             else -> { bar.visibility = View.GONE; return }
@@ -494,7 +495,9 @@ class SketchActivity : Activity(), SketchView.Listener, PenToolbar.Callbacks {
                 if (!cancelled.get()) toast(e.message ?: "Couldn't import that file")
                 null
             }
-            importing = null; refreshBar()
+            // A newer import may have started after this one was cancelled; leave its bar alone.
+            if (importing?.second === stop) importing = null
+            refreshBar()
             if (cancelled.get()) return@launch
             when (prepared) {
                 is SketchAssets.Prepared.Picture -> placePicture(prepared)
@@ -505,6 +508,7 @@ class SketchActivity : Activity(), SketchView.Listener, PenToolbar.Callbacks {
     }
 
     private fun placePicture(p: SketchAssets.Prepared.Picture) {
+        hasImports = true
         val page = view.page
         val r = SketchAssets.fitPicture(p.width, p.height)
         val now = System.currentTimeMillis()
@@ -563,6 +567,7 @@ class SketchActivity : Activity(), SketchView.Listener, PenToolbar.Callbacks {
     }
 
     private fun placeDocument(d: SketchAssets.Prepared.Document, pages: List<Int>) {
+        hasImports = true
         val here = view.page
         scope.launch {
             val start = withContext(SketchStore.io) {
@@ -632,8 +637,11 @@ class SketchActivity : Activity(), SketchView.Listener, PenToolbar.Callbacks {
     private fun syncLater() {
         if (book?.shared != true) return
         main.removeCallbacks(syncSoon)
-        main.postDelayed(syncSoon, 4000)
+        // Imported pictures and documents travel in the shared file, so wait longer between saves.
+        main.postDelayed(syncSoon, if (hasImports) 20_000L else 4000L)
     }
+
+    private var hasImports = false
 
     private fun syncNow(force: Boolean = false) {
         val b = book
@@ -843,11 +851,12 @@ class SketchActivity : Activity(), SketchView.Listener, PenToolbar.Callbacks {
     private fun sendPage() {
         val b = book ?: return
         val strokes = view.pageStrokes.toList()
+        val items = view.pageItems.toList()
         val page = view.page
         scope.launch {
             try {
                 val f = withContext(Dispatchers.Default) {
-                    val bmp = SketchRender.bitmap(1600, b.paper, strokes, false, settings.pressure)
+                    val bmp = SketchRender.bitmap(1600, b.paper, strokes, false, settings.pressure, items, store)
                     val file = File(SharedFiles.dir(app), "${SketchSync.safeName(b.title)} p${page + 1}.png")
                     try { file.outputStream().use { bmp.compress(android.graphics.Bitmap.CompressFormat.PNG, 100, it) } } finally { bmp.recycle() }
                     file
@@ -882,7 +891,9 @@ class SketchActivity : Activity(), SketchView.Listener, PenToolbar.Callbacks {
             REQ_IMPORT -> importFile(uri)
             REQ_PDF -> scope.launch {
                 try {
-                    withContext(SketchStore.io) {
+                    toast("Saving the PDF…")
+                    // Off the database thread: drawing stays responsive while a long export runs.
+                    withContext(Dispatchers.IO) {
                         contentResolver.openOutputStream(uri, "w")?.use { SketchRender.pdf(store, bookId, it, settings.pressure) } ?: error("Couldn't write the file")
                     }
                     toast("PDF saved")
