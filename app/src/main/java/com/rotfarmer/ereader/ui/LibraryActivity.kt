@@ -40,6 +40,12 @@ import com.rotfarmer.ereader.data.Excerpt
 import com.rotfarmer.ereader.data.ImportException
 import com.rotfarmer.ereader.data.Importer
 import com.rotfarmer.ereader.render.ReaderColors
+import com.rotfarmer.ereader.sketch.SketchActivity
+import com.rotfarmer.ereader.sketch.SketchFile
+import com.rotfarmer.ereader.sketch.SketchRender
+import com.rotfarmer.ereader.sketch.SketchStore
+import com.rotfarmer.ereader.sketch.SketchSync
+import com.rotfarmer.ereader.sketch.Sketchbook
 import com.rotfarmer.ereader.update.UpdateException
 import com.rotfarmer.ereader.update.Updater
 import android.provider.Settings as AndroidSettings
@@ -69,6 +75,15 @@ class LibraryActivity : Activity() {
     private var sortMode = 0
     private val bookAdapter = BookAdapter()
     private val excerptAdapter = ExcerptAdapter()
+    private var sketchbooks: List<Sketchbook> = emptyList()
+    private val sketchAdapter = SketchAdapter()
+    private val sketches by lazy { SketchStore.of(this) }
+    /** Pictures of each sketchbook's latest page, keyed by id and last change. */
+    private val sketchThumbs = object : LruCache<String, Bitmap>((Runtime.getRuntime().maxMemory() / 16).toInt()) {
+        override fun sizeOf(key: String, value: Bitmap) = value.byteCount
+    }
+    private val thumbsLoading = HashSet<String>()
+    private var sketchGrid: GridView? = null
 
     private val covers = object : LruCache<String, Bitmap>((Runtime.getRuntime().maxMemory() / 10).toInt()) {
         override fun sizeOf(key: String, value: Bitmap) = value.byteCount
@@ -159,8 +174,8 @@ class LibraryActivity : Activity() {
             }
         })
         header.addView(IconButton(this, Icons.ADD, ui).apply {
-            contentDescription = "Add books"
-            setOnClickListener { openPicker() }
+            contentDescription = "Add books or sketchbooks"
+            setOnClickListener { if (settings.libraryTab == 2) sketchAddMenu() else openPicker() }
         })
         header.addView(IconButton(this, Icons.MORE, ui).apply {
             contentDescription = "More"
@@ -180,7 +195,7 @@ class LibraryActivity : Activity() {
         })
         root.addView(header)
 
-        val tabs = Segmented(this, listOf("Books", "Excerpts"), settings.libraryTab, ui) {
+        val tabs = Segmented(this, listOf("Books", "Excerpts", "Sketchbooks"), settings.libraryTab.coerceIn(0, 2), ui) {
             settings.libraryTab = it; showTab()
         }
         root.addView(tabs, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply {
@@ -222,6 +237,26 @@ class LibraryActivity : Activity() {
                 setOnItemLongClickListener { _, _, pos, _ -> bookMenu(books[pos]); true }
             }
             content.addView(grid)
+        } else if (settings.libraryTab == 2) {
+            if (sketchbooks.isEmpty()) {
+                content.addView(emptyView("No sketchbooks yet", "A sketchbook is 350 pages to draw and write on with the S Pen.\nYou can keep one in sync between your devices."))
+                return
+            }
+            val grid = GridView(this).apply {
+                numColumns = GridView.AUTO_FIT
+                columnWidth = dp(150)
+                stretchMode = GridView.STRETCH_COLUMN_WIDTH
+                horizontalSpacing = dp(14)
+                verticalSpacing = dp(18)
+                setPadding(dp(16), dp(14), dp(16), dp(24))
+                clipToPadding = false
+                selector = android.graphics.drawable.ColorDrawable(Color.TRANSPARENT)
+                adapter = sketchAdapter
+                setOnItemClickListener { _, _, pos, _ -> startActivity(SketchActivity.intent(this@LibraryActivity, sketchbooks[pos].id)) }
+                setOnItemLongClickListener { _, _, pos, _ -> sketchMenu(sketchbooks[pos]); true }
+            }
+            sketchGrid = grid
+            content.addView(grid)
         } else {
             if (excerpts.isEmpty()) {
                 content.addView(emptyView("No excerpts yet", "While reading, long-press text (or a part of a PDF page) and choose Excerpt. Your excerpts from every book appear here."))
@@ -248,11 +283,18 @@ class LibraryActivity : Activity() {
         addView(label(this@LibraryActivity, title, ui, 20f, bold = true, serif = true).apply { gravity = Gravity.CENTER })
         addView(label(this@LibraryActivity, body, ui, 15f, ui.muted).apply { gravity = Gravity.CENTER; setPadding(0, dp(10), 0, dp(20)) })
         if (settings.libraryTab == 0) addView(TextButton(this@LibraryActivity, "Add books", ui, filled = true).apply { setOnClickListener { openPicker() } })
+        if (settings.libraryTab == 2) {
+            addView(TextButton(this@LibraryActivity, "New sketchbook", ui, filled = true).apply { setOnClickListener { newSketchbook() } })
+            addView(TextButton(this@LibraryActivity, "Open shared sketchbook…", ui).apply { setOnClickListener { pickSketchFile(reqOpenShared) } },
+                LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { topMargin = dp(10) })
+        }
     }
 
     private fun reload() {
         scope.launch {
             val (b, e) = withContext(Db.io) { app.db.books() to app.db.allExcerpts() }
+            // Sketchbooks have their own database; a problem there must never hide the books.
+            sketchbooks = withContext(SketchStore.io) { runCatching { sketches.list() }.getOrDefault(emptyList()) }
             books = when (sortMode) {
                 1 -> b.sortedBy { it.title.lowercase() }
                 2 -> b.sortedWith(compareBy({ it.author.lowercase() }, { it.title.lowercase() }))
@@ -262,7 +304,141 @@ class LibraryActivity : Activity() {
             showTab()
             bookAdapter.notifyDataSetChanged()
             excerptAdapter.notifyDataSetChanged()
+            sketchAdapter.notifyDataSetChanged()
             checkCovers()
+            syncSharedSketchbooks()
+        }
+    }
+
+    // ------------------------------------------------------------------ sketchbooks
+
+    private var syncingAll = false
+
+    /** Brings shared sketchbooks up to date with changes from other devices, in the background. */
+    private fun syncSharedSketchbooks() {
+        if (syncingAll) return
+        val shared = sketchbooks.filter { it.shared }
+        if (shared.isEmpty()) return
+        syncingAll = true
+        scope.launch {
+            var changed = false
+            for (sb in shared) {
+                val r = withContext(SketchSync.dispatcher) { if (SketchSync.remoteChanged(app, sb.id)) SketchSync.sync(app, sb.id) else null }
+                if (r?.anything == true) changed = true
+            }
+            syncingAll = false
+            if (changed && !isDestroyed) {
+                sketchbooks = withContext(SketchStore.io) { runCatching { sketches.list() }.getOrDefault(sketchbooks) }
+                sketchAdapter.notifyDataSetChanged()
+            }
+        }
+    }
+
+    private fun sketchAddMenu() {
+        dialog(this, settings.dark).setItems(arrayOf("New sketchbook", "Open shared sketchbook…", "Import a sketchbook copy…")) { _, i ->
+            when (i) {
+                0 -> newSketchbook()
+                1 -> pickSketchFile(reqOpenShared)
+                2 -> pickSketchFile(reqImportSketch)
+            }
+        }.show()
+    }
+
+    private fun newSketchbook() {
+        val input = EditText(this).apply { hint = "Name"; setSingleLine(); setTextColor(ui.fg); setHintTextColor(ui.muted) }
+        val box = FrameLayout(this).apply { setPadding(dp(20), dp(8), dp(20), 0); addView(input) }
+        dialog(this, settings.dark).setTitle("New sketchbook").setView(box).setNegativeButton("Cancel", null)
+            .setPositiveButton("Create") { _, _ ->
+                val name = input.text.toString().trim().ifEmpty { "Sketchbook" }
+                scope.launch {
+                    val id = withContext(SketchStore.io) { sketches.create(name) }
+                    startActivity(SketchActivity.intent(this@LibraryActivity, id))
+                }
+            }.show()
+    }
+
+    private fun pickSketchFile(request: Int) {
+        try {
+            @Suppress("DEPRECATION")
+            startActivityForResult(Intent(Intent.ACTION_OPEN_DOCUMENT).addCategory(Intent.CATEGORY_OPENABLE).setType("*/*"), request)
+        } catch (e: Exception) {
+            Toast.makeText(this, "No file picker available", Toast.LENGTH_LONG).show()
+        }
+    }
+
+    /** Opens a shared sketchbook file (linked, kept in sync) or imports a one-off copy. */
+    private fun openSketchFile(uri: Uri, linked: Boolean) {
+        status?.text = if (linked) "Opening shared sketchbook…" else "Adding sketchbook…"
+        status?.visibility = View.VISIBLE
+        scope.launch {
+            try {
+                val id = withContext(SketchSync.dispatcher) {
+                    if (linked) SketchSync.openSharedFile(app, uri) else SketchSync.importCopy(app, uri).bookId
+                }
+                settings.libraryTab = 2
+                build(); reload()
+                startActivity(SketchActivity.intent(this@LibraryActivity, id))
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                status?.visibility = View.GONE
+                dialog(this@LibraryActivity, settings.dark).setTitle("Couldn't open that sketchbook")
+                    .setMessage(if (e is java.io.IOException && e.message == "Not a sketchbook") "That file isn't an E-Reader sketchbook." else e.message ?: "Something went wrong.")
+                    .setPositiveButton("OK", null).show()
+            }
+        }
+    }
+
+    private fun sketchMenu(sb: Sketchbook) {
+        dialog(this, settings.dark).setTitle(sb.title)
+            .setItems(arrayOf("Open", "Rename", "Send a copy", "Delete from this device")) { _, i ->
+                when (i) {
+                    0 -> startActivity(SketchActivity.intent(this, sb.id))
+                    1 -> {
+                        val input = EditText(this).apply { setText(sb.title); setSingleLine(); selectAll(); setTextColor(ui.fg) }
+                        val box = FrameLayout(this).apply { setPadding(dp(20), dp(8), dp(20), 0); addView(input) }
+                        dialog(this, settings.dark).setTitle("Rename sketchbook").setView(box).setNegativeButton("Cancel", null)
+                            .setPositiveButton("Save") { _, _ ->
+                                val name = input.text.toString().trim()
+                                if (name.isNotEmpty()) scope.launch {
+                                    withContext(SketchStore.io) { sketches.rename(sb.id, name) }
+                                    if (sb.shared) withContext(SketchSync.dispatcher) { SketchSync.sync(app, sb.id) }
+                                    reload()
+                                }
+                            }.show()
+                    }
+                    2 -> scope.launch {
+                        try {
+                            val f = withContext(SketchStore.io) { SketchSync.exportCopy(app, sb.id) }
+                            startActivity(SketchSync.shareIntent(this@LibraryActivity, f, "application/zip", sb.title))
+                        } catch (e: CancellationException) { throw e } catch (e: Exception) {
+                            Toast.makeText(this@LibraryActivity, e.message ?: "Couldn't make a copy", Toast.LENGTH_LONG).show()
+                        }
+                    }
+                    3 -> dialog(this, settings.dark)
+                        .setMessage(if (sb.shared) "Delete “${sb.title}” from this device? The shared file and your other devices keep it." else "Delete “${sb.title}” and everything drawn in it?")
+                        .setPositiveButton("Delete") { _, _ -> scope.launch { withContext(SketchStore.io) { sketches.delete(sb.id) }; reload() } }
+                        .setNegativeButton("Cancel", null).show()
+                }
+            }.show()
+    }
+
+    private fun sketchThumb(sb: Sketchbook, into: ImageView) {
+        val key = "${sb.id}:${sb.updated}:${settings.dark}"
+        into.tag = key
+        sketchThumbs.get(key)?.let { into.setImageBitmap(it); return }
+        into.setImageBitmap(null)
+        if (!thumbsLoading.add(key)) return
+        scope.launch {
+            val bmp = try {
+                val strokes = withContext(SketchStore.io) { sketches.strokes(sb.id, sketches.latestPage(sb.id) ?: sb.currentPage) }
+                withContext(Dispatchers.Default) { SketchRender.bitmap(dp(150), sb.paper, strokes, settings.dark, settings.pressure) }
+            } catch (e: CancellationException) { throw e } catch (e: Exception) { null }
+            thumbsLoading.remove(key)
+            if (bmp != null) {
+                sketchThumbs.put(key, bmp)
+                if (into.tag == key) into.setImageBitmap(bmp)
+            }
         }
     }
 
@@ -467,6 +643,8 @@ class LibraryActivity : Activity() {
     // ------------------------------------------------------------------ import
 
     private val reqOpen = 41
+    private val reqOpenShared = 42
+    private val reqImportSketch = 43
 
     private fun openPicker() {
         val i = Intent(Intent.ACTION_OPEN_DOCUMENT).addCategory(Intent.CATEGORY_OPENABLE).setType("*/*")
@@ -491,6 +669,10 @@ class LibraryActivity : Activity() {
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
         @Suppress("DEPRECATION")
         super.onActivityResult(requestCode, resultCode, data)
+        if ((requestCode == reqOpenShared || requestCode == reqImportSketch) && resultCode == RESULT_OK) {
+            data?.data?.let { openSketchFile(it, linked = requestCode == reqOpenShared) }
+            return
+        }
         if (requestCode != reqOpen || resultCode != RESULT_OK || data == null) return
         val uris = ArrayList<Uri>()
         data.clipData?.let { cd -> for (k in 0 until cd.itemCount) uris += cd.getItemAt(k).uri }
@@ -512,8 +694,29 @@ class LibraryActivity : Activity() {
         }
     }
 
+    /** True if [uri] is a sketchbook file (judged from its first bytes). */
+    private fun isSketchbook(uri: Uri): Boolean = try {
+        contentResolver.openInputStream(uri)?.use { input ->
+            val head = ByteArray(64); var n = 0
+            while (n < head.size) { val r = input.read(head, n, head.size - n); if (r < 0) break; n += r }
+            SketchFile.looksLikeSketchbook(head.copyOf(n))
+        } ?: false
+    } catch (e: Exception) { false }
+
     private fun importAll(uris: List<Uri>, openAfter: Boolean) {
         if (uris.isEmpty()) return
+        // A sketchbook someone sent: add it (or merge it into the copy already here).
+        if (uris.size == 1) {
+            scope.launch {
+                if (withContext(Dispatchers.IO) { isSketchbook(uris[0]) }) openSketchFile(uris[0], linked = false)
+                else importBooks(uris, openAfter)
+            }
+            return
+        }
+        importBooks(uris, openAfter)
+    }
+
+    private fun importBooks(uris: List<Uri>, openAfter: Boolean) {
         scope.launch {
             val errors = ArrayList<String>()
             var last: Book? = null
@@ -755,6 +958,47 @@ class LibraryActivity : Activity() {
             }
             (cell.getChildAt(3) as TextView).text = listOf(b.author, state).filter { it.isNotBlank() }.joinToString(" · ")
             return cell
+        }
+    }
+
+    private inner class SketchAdapter : BaseAdapter() {
+        override fun getCount() = sketchbooks.size
+        override fun getItem(position: Int) = sketchbooks[position]
+        override fun getItemId(position: Int) = sketchbooks[position].id.hashCode().toLong()
+
+        override fun getView(position: Int, convertView: View?, parent: ViewGroup?): View {
+            val sb = sketchbooks[position]
+            val cell = (convertView as? LinearLayout) ?: LinearLayout(this@LibraryActivity).apply {
+                orientation = LinearLayout.VERTICAL
+                layoutParams = AbsListView.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
+                addView(PageView(context).apply {
+                    scaleType = ImageView.ScaleType.FIT_XY
+                    background = panelBg(context, ui, 2f, 1f, SketchRender.paperColor(settings.dark))
+                    setPadding(dp(1), dp(1), dp(1), dp(1))
+                })
+                addView(label(context, "", ui, 14.5f, serif = true).apply {
+                    maxLines = 2; ellipsize = TextUtils.TruncateAt.END; setPadding(0, dp(8), 0, 0)
+                })
+                addView(label(context, "", ui, 12f, ui.muted).apply { maxLines = 1; ellipsize = TextUtils.TruncateAt.END })
+            }
+            sketchThumb(sb, cell.getChildAt(0) as ImageView)
+            (cell.getChildAt(1) as TextView).text = sb.title
+            val drawn = if (sb.usedPages == 0) "Empty" else "${sb.usedPages} ${if (sb.usedPages == 1) "page" else "pages"} drawn"
+            val sync = when {
+                !sb.shared -> null
+                sb.syncError != null -> "sync problem"
+                else -> "shared"
+            }
+            (cell.getChildAt(2) as TextView).text = listOfNotNull(drawn, sync).joinToString(" · ")
+            return cell
+        }
+    }
+
+    /** A sketchbook page's shape (A4). */
+    private class PageView(ctx: Context) : ImageView(ctx) {
+        override fun onMeasure(widthMeasureSpec: Int, heightMeasureSpec: Int) {
+            val w = MeasureSpec.getSize(widthMeasureSpec)
+            setMeasuredDimension(w, (w * SketchFile.ASPECT).toInt())
         }
     }
 

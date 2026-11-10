@@ -1,0 +1,638 @@
+package com.rotfarmer.ereader.sketch
+
+import android.app.Activity
+import android.content.Context
+import android.content.Intent
+import android.graphics.RectF
+import android.os.Build
+import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
+import android.text.InputType
+import android.text.TextUtils
+import android.text.format.DateUtils
+import android.view.Gravity
+import android.view.View
+import android.view.ViewGroup
+import android.view.WindowInsets
+import android.view.WindowInsetsController
+import android.view.WindowManager
+import android.widget.EditText
+import android.widget.FrameLayout
+import android.widget.GridView
+import android.widget.LinearLayout
+import android.widget.TextView
+import android.widget.Toast
+import com.rotfarmer.ereader.App
+import com.rotfarmer.ereader.ink.Anchor
+import com.rotfarmer.ereader.ink.InkStroke
+import com.rotfarmer.ereader.ink.Tools
+import com.rotfarmer.ereader.ui.IconButton
+import com.rotfarmer.ereader.ui.Icons
+import com.rotfarmer.ereader.ui.Overlay
+import com.rotfarmer.ereader.ui.PenToolbar
+import com.rotfarmer.ereader.ui.Segmented
+import com.rotfarmer.ereader.ui.TextButton
+import com.rotfarmer.ereader.ui.ToolOptions
+import com.rotfarmer.ereader.ui.UiColors
+import com.rotfarmer.ereader.ui.card
+import com.rotfarmer.ereader.ui.dialog
+import com.rotfarmer.ereader.ui.dp
+import com.rotfarmer.ereader.ui.label
+import com.rotfarmer.ereader.ui.panelBg
+import com.rotfarmer.ereader.ui.sectionTitle
+import com.rotfarmer.ereader.ui.slider
+import com.rotfarmer.ereader.ui.toggleRow
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import java.io.File
+
+/**
+ * A sketchbook: a page to draw on with the S Pen, the reader's pen toolbar, and a top bar with
+ * the pages and sharing. Every stroke is saved as soon as it is drawn.
+ */
+class SketchActivity : Activity(), SketchView.Listener, PenToolbar.Callbacks {
+    private val app by lazy { App.of(this) }
+    private val settings get() = app.settings
+    private val store by lazy { SketchStore.of(this) }
+    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
+    private val main = Handler(Looper.getMainLooper())
+    private var ui = UiColors(false)
+
+    private lateinit var bookId: String
+    private var book: Sketchbook? = null
+    private lateinit var root: FrameLayout
+    private lateinit var view: SketchView
+    private lateinit var topBar: LinearLayout
+    private lateinit var title: TextView
+    private lateinit var status: TextView
+    private lateinit var pageChip: TextView
+    private lateinit var penBtn: IconButton
+    private var toolbar: PenToolbar? = null
+    private lateinit var popups: Overlay
+    private var syncing = false
+
+    /** Undo and redo, per page, for this visit. */
+    private class Op(val added: List<InkStroke>, val removed: List<InkStroke>)
+    private val undo = HashMap<Int, ArrayDeque<Op>>()
+    private val redo = HashMap<Int, ArrayDeque<Op>>()
+
+    // ------------------------------------------------------------------ lifecycle
+
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+        bookId = intent.getStringExtra(EXTRA_ID) ?: run { finish(); return }
+        ui = UiColors(settings.dark)
+        setupWindow()
+        build()
+        scope.launch {
+            val b = withContext(SketchStore.io) { store.get(bookId) }
+            if (b == null) { toast("This sketchbook is no longer on this device"); finish(); return@launch }
+            book = b
+            view.paper = b.paper
+            showPage(b.currentPage.coerceIn(0, b.pages - 1))
+            updateTitle()
+        }
+    }
+
+    override fun onResume() {
+        super.onResume()
+        hideSystemBars()
+        syncNow()
+        main.postDelayed(poll, POLL_MS)
+    }
+
+    override fun onPause() {
+        super.onPause()
+        main.removeCallbacks(poll)
+        main.removeCallbacks(syncSoon)
+        // Pass this visit's drawing on to the shared file; finishes even after the screen closes.
+        if (book?.shared == true) App.io.launch(SketchSync.dispatcher) { SketchSync.sync(app, bookId) }
+    }
+
+    override fun onDestroy() {
+        super.onDestroy()
+        main.removeCallbacksAndMessages(null)
+        scope.cancel()
+    }
+
+    override fun onWindowFocusChanged(hasFocus: Boolean) {
+        super.onWindowFocusChanged(hasFocus)
+        if (hasFocus) hideSystemBars()
+    }
+
+    @Deprecated("Deprecated in Java")
+    override fun onBackPressed() {
+        if (popups.isShowing) popups.dismissTop() else finish()
+    }
+
+    @Suppress("DEPRECATION")
+    private fun setupWindow() {
+        if (Build.VERSION.SDK_INT >= 30) window.setDecorFitsSystemWindows(false)
+        else window.decorView.systemUiVisibility = View.SYSTEM_UI_FLAG_LAYOUT_STABLE or View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN or View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION
+        window.statusBarColor = android.graphics.Color.TRANSPARENT
+        window.navigationBarColor = android.graphics.Color.TRANSPARENT
+        window.attributes = window.attributes.apply { layoutInDisplayCutoutMode = WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES }
+    }
+
+    @Suppress("DEPRECATION")
+    private fun hideSystemBars() {
+        if (Build.VERSION.SDK_INT >= 30) {
+            window.decorView.windowInsetsController?.let {
+                it.hide(WindowInsets.Type.statusBars() or WindowInsets.Type.navigationBars())
+                it.systemBarsBehavior = WindowInsetsController.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+            }
+        } else {
+            window.decorView.systemUiVisibility = View.SYSTEM_UI_FLAG_LAYOUT_STABLE or View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN or
+                View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION or View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY or View.SYSTEM_UI_FLAG_FULLSCREEN or View.SYSTEM_UI_FLAG_HIDE_NAVIGATION
+        }
+    }
+
+    // ------------------------------------------------------------------ layout
+
+    private fun build() {
+        root = FrameLayout(this).apply { setBackgroundColor(SketchRender.deskColor(settings.dark)) }
+        view = SketchView(this, settings).apply { dark = settings.dark; listener = this@SketchActivity }
+        root.addView(view, FrameLayout.LayoutParams(-1, -1))
+
+        topBar = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL
+            setBackgroundColor(ui.bg); setPadding(dp(6), 0, dp(6), 0)
+        }
+        topBar.addView(IconButton(this, Icons.BACK, ui).apply { contentDescription = "Back to library"; setOnClickListener { finish() } })
+        val titles = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(dp(8), 0, dp(8), 0) }
+        title = label(this, "", ui, 17f, serif = true).apply { maxLines = 1; ellipsize = TextUtils.TruncateAt.END }
+        status = label(this, "", ui, 12f, ui.muted).apply { maxLines = 1; ellipsize = TextUtils.TruncateAt.END; setOnClickListener { showShare(it) } }
+        titles.addView(title); titles.addView(status)
+        topBar.addView(titles, LinearLayout.LayoutParams(0, -2, 1f))
+        topBar.addView(IconButton(this, Icons.CHEV_LEFT, ui).apply { contentDescription = "Previous page"; setOnClickListener { turn(-1) } })
+        pageChip = label(this, "", ui, 14f, bold = true).apply {
+            gravity = Gravity.CENTER; minWidth = dp(84)
+            background = panelBg(this@SketchActivity, ui, 18f, 1f, ui.soft)
+            setPadding(dp(12), dp(7), dp(12), dp(7))
+            contentDescription = "Go to a page"
+            setOnClickListener { showPages(it) }
+        }
+        topBar.addView(pageChip)
+        topBar.addView(IconButton(this, Icons.CHEV_RIGHT, ui).apply { contentDescription = "Next page"; setOnClickListener { turn(1) } })
+        topBar.addView(View(this).apply { setBackgroundColor(ui.hairline) }, LinearLayout.LayoutParams(dp(1), dp(26)).apply { marginStart = dp(6); marginEnd = dp(6) })
+        penBtn = IconButton(this, Icons.DRAW, ui).apply {
+            contentDescription = "Pen toolbar"
+            active = settings.sketchToolbarVisible
+            setOnClickListener { settings.sketchToolbarVisible = !settings.sketchToolbarVisible; buildToolbar() }
+        }
+        topBar.addView(penBtn)
+        topBar.addView(IconButton(this, Icons.SHARE, ui).apply { contentDescription = "Share and sync"; setOnClickListener { showShare(this) } })
+        topBar.addView(IconButton(this, Icons.MORE, ui).apply { contentDescription = "More"; setOnClickListener { showMore(this) } })
+
+        val header = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            isClickable = true // touches on the bar never reach the page
+            addView(topBar, LinearLayout.LayoutParams(-1, dp(56)))
+            addView(View(this@SketchActivity).apply { setBackgroundColor(ui.line) }, LinearLayout.LayoutParams(-1, dp(1)))
+            setBackgroundColor(ui.bg)
+            // Stay clear of a camera cutout at the top.
+            setOnApplyWindowInsetsListener { v, ins ->
+                val cut = ins.getInsets(WindowInsets.Type.displayCutout())
+                v.setPadding(cut.left, cut.top, cut.right, 0)
+                view.insetTop = cut.top + dp(57); view.layoutPage()
+                ins
+            }
+        }
+        root.addView(header, FrameLayout.LayoutParams(-1, -2, Gravity.TOP))
+        view.insetTop = dp(57)
+        setContentView(root)
+        popups = Overlay(root)
+        buildToolbar()
+    }
+
+    private fun buildToolbar() {
+        toolbar?.let { root.removeView(it.parent as? View ?: it) }
+        toolbar = null
+        penBtn.active = settings.sketchToolbarVisible
+        view.insetLeft = 0; view.insetRight = 0
+        if (settings.sketchToolbarVisible) {
+            val tb = PenToolbar(this, ui, settings, this, writingSpace = false)
+            // Scrolls when the screen is too short for every button (landscape phones).
+            val holder = android.widget.ScrollView(this).apply {
+                isVerticalScrollBarEnabled = false; overScrollMode = View.OVER_SCROLL_NEVER
+                addView(tb, FrameLayout.LayoutParams(-2, -2))
+            }
+            root.addView(holder, 1, FrameLayout.LayoutParams(-2, -2, Gravity.CENTER_VERTICAL or if (settings.toolbarRight) Gravity.END else Gravity.START).apply {
+                marginStart = dp(8); marginEnd = dp(8); topMargin = dp(60)
+            })
+            toolbar = tb
+            if (settings.toolbarRight) view.insetRight = dp(66) else view.insetLeft = dp(66)
+            updateUndo()
+        }
+        view.layoutPage()
+    }
+
+    private fun updateTitle() {
+        val b = book ?: return
+        title.text = b.title
+        pageChip.text = "${view.page + 1} / ${b.pages}"
+        status.text = when {
+            !b.shared -> "Only on this device · tap to share"
+            syncing -> "Syncing…"
+            b.syncError != null -> "Sync problem · tap for details"
+            b.syncedAt > 0 -> "Synced " + DateUtils.getRelativeTimeSpanString(b.syncedAt, System.currentTimeMillis(), DateUtils.MINUTE_IN_MILLIS).toString().lowercase()
+            else -> "Shared"
+        }
+        status.setTextColor(if (b.syncError != null) 0xFFB03A2E.toInt() else ui.muted)
+    }
+
+    // ------------------------------------------------------------------ pages
+
+    private fun showPage(index: Int) {
+        scope.launch {
+            val list = withContext(SketchStore.io) { store.setCurrentPage(bookId, index); store.strokes(bookId, index) }
+            view.setPage(index, list)
+            updateTitle(); updateUndo()
+        }
+    }
+
+    private fun turn(step: Int) {
+        val b = book ?: return
+        val next = view.page + step
+        if (next < 0) return
+        if (next >= b.pages) { toast("This is the last page. Add pages from the ⋮ menu."); return }
+        popups.dismissAll()
+        showPage(next)
+    }
+
+    override fun onTurn(step: Int) = turn(step)
+
+    // ------------------------------------------------------------------ drawing
+
+    override fun onStrokeAdded(stroke: InkStroke) {
+        val page = view.page
+        record(page, Op(listOf(stroke), emptyList()))
+        scope.launch(SketchStore.io) { store.addStrokes(bookId, page, listOf(stroke)) }
+        syncLater()
+    }
+
+    override fun onStrokesErased(strokes: List<InkStroke>) {
+        val page = view.page
+        record(page, Op(emptyList(), strokes))
+        scope.launch(SketchStore.io) { store.eraseStrokes(bookId, strokes.map { it.id }) }
+        syncLater()
+    }
+
+    private fun record(page: Int, op: Op) {
+        undo.getOrPut(page) { ArrayDeque() }.addLast(op)
+        redo[page]?.clear()
+        updateUndo()
+    }
+
+    private fun updateUndo() {
+        toolbar?.setUndoState(undo[view.page]?.isNotEmpty() == true, redo[view.page]?.isNotEmpty() == true)
+    }
+
+    /**
+     * Undoes [op]: erases what it added and draws again what it erased (as new strokes, since an
+     * erased stroke stays erased on every device). Returns the operation that undoes this.
+     */
+    private fun invert(page: Int, op: Op): Op {
+        val again = op.removed.map { InkStroke(SketchStore.newStrokeId(), 0L, Anchor(Anchor.PDF, page.toLong(), 0), it.tool, it.color, it.width, it.pts, it.created) }
+        val gone = op.added.map { it.id }.toSet()
+        view.setStrokes(view.pageStrokes.filter { it.id !in gone } + again)
+        scope.launch(SketchStore.io) {
+            store.eraseStrokes(bookId, gone)
+            store.addStrokes(bookId, page, again)
+        }
+        syncLater()
+        return Op(again, op.added)
+    }
+
+    override fun onUndo() {
+        val page = view.page
+        val op = undo[page]?.removeLastOrNull() ?: return
+        redo.getOrPut(page) { ArrayDeque() }.addLast(invert(page, op))
+        updateUndo()
+    }
+
+    override fun onRedo() {
+        val page = view.page
+        val op = redo[page]?.removeLastOrNull() ?: return
+        undo.getOrPut(page) { ArrayDeque() }.addLast(invert(page, op))
+        updateUndo()
+    }
+
+    private fun clearPage() {
+        val all = view.pageStrokes.toList()
+        if (all.isEmpty()) return
+        view.setStrokes(emptyList())
+        onStrokesErased(all)
+        toast("Page cleared. Undo brings it back.")
+    }
+
+    override fun onToolChanged() { view.invalidate() }
+
+    override fun onToolOptions(anchor: View) {
+        popups.dismissAll()
+        val tool = settings.tool
+        val opts = ToolOptions(this, ui, settings, tool, onChanged = {
+            toolbar?.refresh()
+            view.refreshPen()
+        }, onClearPage = if (tool == Tools.ERASER) ({ popups.dismissAll(); clearPage() }) else null)
+        val r = anchorOf(anchor)
+        val side = if (settings.toolbarRight) RectF(r.left - dp(8), r.top, r.left - dp(8), r.bottom) else RectF(r.right + dp(8), r.top, r.right + dp(8), r.bottom)
+        popups.show(opts, side, below = true, maxWidthDp = 320, alignRight = settings.toolbarRight)
+    }
+
+    override fun onInsertSpace(armed: Boolean) {}
+    override fun onSideChanged() = buildToolbar()
+    override fun onExpandedChanged() = updateUndo()
+    override fun onHide() { settings.sketchToolbarVisible = false; buildToolbar() }
+
+    // ------------------------------------------------------------------ sync
+
+    private val syncSoon = Runnable { syncNow() }
+    private val poll = object : Runnable {
+        override fun run() {
+            if (book?.shared == true && !syncing) scope.launch {
+                val changed = withContext(SketchSync.dispatcher) { SketchSync.remoteChanged(app, bookId) }
+                if (changed) syncNow()
+            }
+            main.postDelayed(this, POLL_MS)
+        }
+    }
+
+    /** Sync a few seconds after drawing stops, rather than after every stroke. */
+    private fun syncLater() {
+        if (book?.shared != true) return
+        main.removeCallbacks(syncSoon)
+        main.postDelayed(syncSoon, 4000)
+    }
+
+    private fun syncNow(force: Boolean = false) {
+        val b = book
+        if (b != null && !b.shared) return
+        scope.launch {
+            // Let strokes still being saved reach the database first.
+            withContext(SketchStore.io) {}
+            if (store.get(bookId)?.shared != true) return@launch
+            syncing = true; updateTitle()
+            val result = try { withContext(SketchSync.dispatcher) { SketchSync.sync(app, bookId, force) } } finally { syncing = false }
+            afterChanges(result?.changedPages.orEmpty(), result?.metaChanged == true)
+        }
+    }
+
+    /** Shows what arrived from another device. */
+    private suspend fun afterChanges(changedPages: Set<Int>, metaChanged: Boolean) {
+        val b = withContext(SketchStore.io) { store.get(bookId) } ?: return
+        book = b
+        if (metaChanged) view.paper = b.paper
+        if (view.page in changedPages) {
+            val page = view.page
+            val since = System.currentTimeMillis()
+            val list = withContext(SketchStore.io) { store.strokes(bookId, page) }
+            if (view.page == page) {
+                // Keep strokes drawn while the page was loading; they are saved right after.
+                val ids = list.mapTo(HashSet()) { it.id }
+                view.setStrokes(list + view.pageStrokes.filter { it.created >= since && it.id !in ids })
+            }
+        }
+        updateTitle()
+    }
+
+    // ------------------------------------------------------------------ popups
+
+    private fun anchorOf(v: View): RectF {
+        val loc = IntArray(2); v.getLocationInWindow(loc)
+        return RectF(loc[0].toFloat(), loc[1].toFloat(), (loc[0] + v.width).toFloat(), (loc[1] + v.height).toFloat())
+    }
+
+    private fun showPages(anchor: View) {
+        popups.dismissAll()
+        val b = book ?: return
+        val c = card(this, ui)
+        c.addView(label(this, "Pages", ui, 19f, bold = true, serif = true))
+        c.addView(sectionTitle(this, "Go to page", ui))
+        val row = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
+        val input = EditText(this).apply {
+            inputType = InputType.TYPE_CLASS_NUMBER; setSingleLine(); hint = "1 – ${b.pages}"; textSize = 16f
+            setTextColor(ui.fg); setHintTextColor(ui.muted)
+            background = panelBg(this@SketchActivity, ui, 8f, 1f, ui.soft); setPadding(dp(12), dp(8), dp(12), dp(8))
+        }
+        row.addView(input, LinearLayout.LayoutParams(0, -2, 1f).apply { marginEnd = dp(8) })
+        row.addView(TextButton(this, "Go", ui, filled = true).apply {
+            setOnClickListener {
+                val n = input.text.toString().toIntOrNull()
+                if (n == null || n !in 1..b.pages) toast("Choose a page from 1 to ${b.pages}") else { popups.dismissAll(); showPage(n - 1) }
+            }
+        })
+        c.addView(row)
+        c.addView(sectionTitle(this, "Pages with drawings", ui))
+        val grid = GridView(this).apply {
+            numColumns = GridView.AUTO_FIT; columnWidth = dp(56); stretchMode = GridView.STRETCH_COLUMN_WIDTH
+            horizontalSpacing = dp(6); verticalSpacing = dp(6)
+            selector = android.graphics.drawable.ColorDrawable(android.graphics.Color.TRANSPARENT)
+        }
+        val empty = label(this, "None yet.", ui, 14f, ui.muted)
+        c.addView(empty)
+        c.addView(grid, LinearLayout.LayoutParams(-1, dp(180)))
+        grid.visibility = View.GONE
+        popups.show(c, anchorOf(anchor), below = true, maxWidthDp = 380)
+        scope.launch {
+            val used = withContext(SketchStore.io) { store.usedPages(bookId) }
+            if (used.isEmpty()) return@launch
+            empty.visibility = View.GONE; grid.visibility = View.VISIBLE
+            grid.adapter = object : android.widget.BaseAdapter() {
+                override fun getCount() = used.size
+                override fun getItem(position: Int) = used[position]
+                override fun getItemId(position: Int) = used[position].toLong()
+                override fun getView(position: Int, convertView: View?, parent: ViewGroup?): View =
+                    TextButton(this@SketchActivity, "${used[position] + 1}", ui).apply {
+                        active = used[position] == view.page
+                        isClickable = false; isFocusable = false
+                    }
+            }
+            grid.setOnItemClickListener { _, _, pos, _ -> popups.dismissAll(); showPage(used[pos]) }
+        }
+    }
+
+    private fun showMore(anchor: View) {
+        popups.dismissAll()
+        val b = book ?: return
+        val c = card(this, ui)
+        c.addView(label(this, "Sketchbook", ui, 19f, bold = true, serif = true))
+        c.addView(sectionTitle(this, "Paper", ui))
+        c.addView(Segmented(this, listOf("Blank", "Lined", "Grid", "Dots"), b.paper, ui) { p ->
+            view.paper = p
+            scope.launch {
+                withContext(SketchStore.io) { store.setPaper(bookId, p) }
+                book = withContext(SketchStore.io) { store.get(bookId) }; syncLater()
+            }
+        })
+        c.addView(sectionTitle(this, "Pages", ui))
+        val pagesRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+        pagesRow.addView(TextButton(this, "Add 50 pages", ui).apply {
+            setOnClickListener {
+                if (b.pages >= SketchFile.MAX_PAGES) { toast("This sketchbook is full"); return@setOnClickListener }
+                scope.launch {
+                    withContext(SketchStore.io) { store.addPages(bookId, 50) }
+                    book = withContext(SketchStore.io) { store.get(bookId) }; updateTitle(); syncLater()
+                    toast("Added 50 pages")
+                }
+            }
+        }, LinearLayout.LayoutParams(0, -2, 1f).apply { marginEnd = dp(6) })
+        pagesRow.addView(TextButton(this, "Clear this page", ui).apply { setOnClickListener { popups.dismissAll(); clearPage() } }, LinearLayout.LayoutParams(0, -2, 1f))
+        c.addView(pagesRow)
+        c.addView(sectionTitle(this, "Pen & touch", ui))
+        c.addView(toggleRow(this, "Draw with finger", "Two fingers zoom and move the page", settings.fingerDraw, ui) { settings.fingerDraw = it })
+        c.addView(label(this, "S Pen pressure", ui, 15f).apply { setPadding(0, dp(6), 0, 0) })
+        c.addView(slider(this, 100, (settings.pressure * 100).toInt(), ui) { v, done ->
+            if (done) { settings.pressure = v / 100f; view.refreshPen(); toolbar?.refresh() }
+        })
+        c.addView(TextButton(this, "Rename sketchbook…", ui).apply { setOnClickListener { popups.dismissAll(); rename() } },
+            LinearLayout.LayoutParams(-2, -2).apply { topMargin = dp(10) })
+        c.addView(label(this, "The S Pen draws; hold its button to erase. Swipe with a finger to turn the page, pinch to zoom.", ui, 12.5f, ui.muted).apply { setPadding(0, dp(10), 0, 0) })
+        popups.show(c, anchorOf(anchor), below = true, maxWidthDp = 400, alignRight = true)
+    }
+
+    private fun rename() {
+        val b = book ?: return
+        val input = EditText(this).apply { setText(b.title); setSingleLine(); selectAll(); setTextColor(ui.fg) }
+        val box = FrameLayout(this).apply { setPadding(dp(20), dp(8), dp(20), 0); addView(input) }
+        dialog(this, settings.dark).setTitle("Rename sketchbook").setView(box).setNegativeButton("Cancel", null)
+            .setPositiveButton("Save") { _, _ ->
+                val name = input.text.toString().trim()
+                if (name.isNotEmpty()) scope.launch {
+                    withContext(SketchStore.io) { store.rename(bookId, name) }
+                    book = withContext(SketchStore.io) { store.get(bookId) }; updateTitle(); syncLater()
+                }
+            }.show()
+    }
+
+    // ------------------------------------------------------------------ sharing
+
+    private fun showShare(anchor: View) {
+        popups.dismissAll()
+        val b = book ?: return
+        val c = card(this, ui)
+        c.addView(label(this, "Share", ui, 19f, bold = true, serif = true))
+        c.addView(sectionTitle(this, "Keep in sync on your other devices", ui))
+        if (!b.shared) {
+            c.addView(label(this, "Save this sketchbook as a file in Google Drive (or another cloud folder). On your other device, open E-Reader → Library → Sketchbooks → + → Open shared sketchbook, and pick the same file. Drawing on either device then shows up on both.", ui, 13.5f, ui.muted))
+            c.addView(TextButton(this, "Save to a shared folder…", ui, filled = true).apply {
+                setOnClickListener {
+                    popups.dismissAll()
+                    pick(Intent(Intent.ACTION_CREATE_DOCUMENT).addCategory(Intent.CATEGORY_OPENABLE).setType("application/octet-stream")
+                        .putExtra(Intent.EXTRA_TITLE, "${SketchSync.safeName(b.title)}.sketchbook"), REQ_LINK)
+                }
+            }, LinearLayout.LayoutParams(-2, -2).apply { topMargin = dp(10) })
+        } else {
+            c.addView(label(this, "Synced with “${b.syncName ?: "shared file"}”.", ui, 14.5f))
+            if (b.syncError != null) c.addView(label(this, b.syncError, ui, 13f, 0xFFB03A2E.toInt()).apply { setPadding(0, dp(4), 0, 0) })
+            else c.addView(label(this, "Changes are saved there a few seconds after you stop drawing, and changes from your other devices appear here.", ui, 13f, ui.muted).apply { setPadding(0, dp(4), 0, 0) })
+            val row = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; setPadding(0, dp(10), 0, 0) }
+            row.addView(TextButton(this, "Sync now", ui, filled = true).apply { setOnClickListener { popups.dismissAll(); syncNow(force = true) } },
+                LinearLayout.LayoutParams(0, -2, 1f).apply { marginEnd = dp(6) })
+            row.addView(TextButton(this, "Stop syncing", ui).apply {
+                setOnClickListener {
+                    popups.dismissAll()
+                    scope.launch {
+                        withContext(SketchStore.io) { store.unlink(bookId) }
+                        book = withContext(SketchStore.io) { store.get(bookId) }; updateTitle()
+                        toast("This device stopped syncing. The shared file is still there.")
+                    }
+                }
+            }, LinearLayout.LayoutParams(0, -2, 1f))
+            c.addView(row)
+        }
+        c.addView(sectionTitle(this, "Send a copy", ui))
+        c.addView(label(this, "For Quick Share, email or messages. Opening the copy in E-Reader on another device adds the sketchbook there, or merges it into the one already there.", ui, 13.5f, ui.muted))
+        val row = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; setPadding(0, dp(10), 0, 0) }
+        row.addView(TextButton(this, "Send sketchbook", ui).apply { setOnClickListener { popups.dismissAll(); sendCopy() } },
+            LinearLayout.LayoutParams(0, -2, 1f).apply { marginEnd = dp(6) })
+        row.addView(TextButton(this, "Send this page", ui).apply { setOnClickListener { popups.dismissAll(); sendPage() } },
+            LinearLayout.LayoutParams(0, -2, 1f))
+        c.addView(row)
+        c.addView(TextButton(this, "Save as PDF…", ui).apply {
+            setOnClickListener {
+                popups.dismissAll()
+                pick(Intent(Intent.ACTION_CREATE_DOCUMENT).addCategory(Intent.CATEGORY_OPENABLE).setType("application/pdf")
+                    .putExtra(Intent.EXTRA_TITLE, "${SketchSync.safeName(b.title)}.pdf"), REQ_PDF)
+            }
+        }, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(6) })
+        popups.show(c, anchorOf(anchor), below = true, maxWidthDp = 440, alignRight = true)
+    }
+
+    private fun sendCopy() {
+        val b = book ?: return
+        scope.launch {
+            try {
+                val f = withContext(SketchStore.io) { SketchSync.exportCopy(app, bookId) }
+                startActivity(SketchSync.shareIntent(this@SketchActivity, f, "application/zip", b.title))
+            } catch (e: CancellationException) { throw e } catch (e: Exception) { toast(e.message ?: "Couldn't make a copy") }
+        }
+    }
+
+    private fun sendPage() {
+        val b = book ?: return
+        val strokes = view.pageStrokes.toList()
+        val page = view.page
+        scope.launch {
+            try {
+                val f = withContext(Dispatchers.Default) {
+                    val bmp = SketchRender.bitmap(1600, b.paper, strokes, false, settings.pressure)
+                    val file = File(SharedFiles.dir(app), "${SketchSync.safeName(b.title)} p${page + 1}.png")
+                    try { file.outputStream().use { bmp.compress(android.graphics.Bitmap.CompressFormat.PNG, 100, it) } } finally { bmp.recycle() }
+                    file
+                }
+                startActivity(SketchSync.shareIntent(this@SketchActivity, f, "image/png", "${b.title}, page ${page + 1}"))
+            } catch (e: CancellationException) { throw e } catch (e: Exception) { toast(e.message ?: "Couldn't make a picture") }
+        }
+    }
+
+    private fun pick(intent: Intent, request: Int) {
+        try {
+            @Suppress("DEPRECATION") startActivityForResult(intent, request)
+        } catch (e: Exception) { toast("No file picker available") }
+    }
+
+    @Deprecated("Deprecated in Java")
+    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
+        @Suppress("DEPRECATION") super.onActivityResult(requestCode, resultCode, data)
+        val uri = data?.data
+        if (resultCode != RESULT_OK || uri == null) return
+        when (requestCode) {
+            REQ_LINK -> scope.launch {
+                syncing = true; updateTitle()
+                try {
+                    withContext(SketchStore.io) {} // pending strokes first
+                    withContext(SketchSync.dispatcher) { SketchSync.linkNewFile(app, bookId, uri) }
+                } catch (e: CancellationException) { throw e } catch (e: Exception) { toast(e.message ?: "Couldn't use that file") }
+                finally { syncing = false }
+                afterChanges(emptySet(), false)
+                if (book?.syncError == null) toast("Saved. Open the same file on your other device to share this sketchbook.")
+            }
+            REQ_PDF -> scope.launch {
+                try {
+                    withContext(SketchStore.io) {
+                        contentResolver.openOutputStream(uri, "w")?.use { SketchRender.pdf(store, bookId, it, settings.pressure) } ?: error("Couldn't write the file")
+                    }
+                    toast("PDF saved")
+                } catch (e: CancellationException) { throw e } catch (e: Exception) { toast(e.message ?: "Couldn't save the PDF") }
+            }
+        }
+    }
+
+    private fun toast(text: String) = Toast.makeText(this, text, Toast.LENGTH_LONG).show()
+
+    companion object {
+        private const val EXTRA_ID = "sketchbook"
+        private const val REQ_LINK = 61
+        private const val REQ_PDF = 62
+        private const val POLL_MS = 20_000L
+
+        fun intent(context: Context, id: String) = Intent(context, SketchActivity::class.java).putExtra(EXTRA_ID, id)
+    }
+}

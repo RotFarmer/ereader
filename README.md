@@ -66,6 +66,21 @@ Tap the **×** in a writing space's corner to delete it (an Undo button appears 
 - **Notebook** (open-book icon in the menu): all bookmarks, highlights and excerpts in the book. Tap any of them to jump to it; the passage is outlined so you can find it on the page.
 - **Excerpts** tab in the library: excerpts from every book, newest first. Tap one to open the book at that exact spot.
 
+## Sketchbooks
+
+Library → **Sketchbooks** → **+** → **New sketchbook**. A sketchbook has 350 pages (add more from **⋮**) on blank, lined, grid or dotted paper.
+
+- **Draw** with the S Pen using the same pens as the reader; hold the S Pen button (or pick the eraser) to erase. Undo and redo are on the pen toolbar.
+- **Pages:** swipe with a finger, use the arrows, or tap the page number to jump to a page or to any page you've drawn on. Pinch to zoom.
+- Everything is saved as you draw.
+
+### Sharing between devices
+
+Tap the **share** button in a sketchbook.
+
+- **Keep in sync:** **Save to a shared folder…** and choose Google Drive (or another cloud folder). On your other device, go to Library → Sketchbooks → **+** → **Open shared sketchbook…** and pick the same file. From then on, drawing on either device shows up on both, including erasing; nothing is lost if both draw at the same time.
+- **Send a copy:** sends a `.sketchbook` file by Quick Share, email or messages. Opening it in E-Reader adds the sketchbook, or merges it into the copy already there. **Send this page** sends a picture of the page, and **Save as PDF…** exports every drawn page.
+
 ## Appearance
 
 - Light and dark mode, brightness, and a warm-light slider.

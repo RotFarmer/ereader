@@ -37,6 +37,9 @@
                 <data android:mimeType="application/vnd.openxmlformats-officedocument.wordprocessingml.document" />
                 <data android:mimeType="text/plain" />
                 <data android:mimeType="application/x-mobipocket-ebook" />
+                <!-- Sketchbook copies (.sketchbook) sent from another device. -->
+                <data android:mimeType="application/zip" />
+                <data android:mimeType="application/octet-stream" />
             </intent-filter>
             <intent-filter>
                 <action android:name="android.intent.action.SEND" />
@@ -45,6 +48,8 @@
                 <data android:mimeType="application/pdf" />
                 <data android:mimeType="application/vnd.openxmlformats-officedocument.wordprocessingml.document" />
                 <data android:mimeType="application/x-mobipocket-ebook" />
+                <data android:mimeType="application/zip" />
+                <data android:mimeType="application/octet-stream" />
             </intent-filter>
         </activity>
 
@@ -53,6 +58,19 @@
             android:exported="false"
             android:theme="@style/Theme.EReader.Reader"
             android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboardHidden|density|uiMode" />
+
+        <activity
+            android:name=".sketch.SketchActivity"
+            android:exported="false"
+            android:theme="@style/Theme.EReader.Reader"
+            android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboardHidden|density|uiMode" />
+
+        <!-- Hands sketchbook copies, page pictures and PDFs to the share sheet. -->
+        <provider
+            android:name=".sketch.SharedFiles"
+            android:authorities="com.rotfarmer.ereader.files"
+            android:exported="false"
+            android:grantUriPermissions="true" />
 
         <activity
             android:name=".CrashActivity"

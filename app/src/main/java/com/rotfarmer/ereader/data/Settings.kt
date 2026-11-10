@@ -44,6 +44,8 @@ class Settings(ctx: Context) {
     var toolbarRight by bool("toolbarRight", false)
     var toolbarExpanded by bool("toolbarExpanded", true)
     var toolbarVisible by bool("toolbarVisible", true)
+    /** The sketchbook's pen toolbar has its own switch, so hiding it while reading doesn't hide it here. */
+    var sketchToolbarVisible by bool("sketchToolbarVisible", true)
 
     // Reader footer + reading speed
     var footerMode by int("footerMode", 0)
