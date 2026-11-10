@@ -173,21 +173,22 @@ class InkPainter {
     private val grain = BitmapShader(Eink.grainTile(), Shader.TileMode.REPEAT, Shader.TileMode.REPEAT)
     private val grainMatrix = Matrix()
 
-    fun draw(c: Canvas, s: InkStroke, pl: Placement) {
+    /** [pixels]: screen pixels per stroke unit, when the canvas is already scaled (sizes the pencil grain). */
+    fun draw(c: Canvas, s: InkStroke, pl: Placement, pixels: Float = pl.unit) {
         val shape = s.shape ?: StrokeGeometry.build(s.pts, s.count, s.tool, s.width, sensitivity).also { s.shape = it }
         c.save()
         pl.clip?.let { c.clipRect(it) }
         c.translate(pl.ox, pl.oy)
         c.scale(pl.unit, pl.unit)
-        c.drawPath(shape.path, paint(s.tool, s.color, s.width, shape, pl.unit))
+        c.drawPath(shape.path, paint(s.tool, s.color, s.width, shape, pixels))
         c.restore()
     }
 
-    /** Draws a stroke that is still being written, in screen pixels. */
-    fun drawLive(c: Canvas, pts: FloatArray, count: Int, tool: Int, color: Int, width: Float) {
+    /** Draws a stroke that is still being written, in screen pixels (or [pixels] per unit on a scaled canvas). */
+    fun drawLive(c: Canvas, pts: FloatArray, count: Int, tool: Int, color: Int, width: Float, pixels: Float = 1f) {
         if (count == 0) return
         val shape = StrokeGeometry.build(pts, count, tool, width, sensitivity)
-        c.drawPath(shape.path, paint(tool, color, width, shape, 1f))
+        c.drawPath(shape.path, paint(tool, color, width, shape, pixels))
     }
 
     private fun paint(tool: Int, color: Int, width: Float, shape: StrokeShape, unit: Float): Paint {

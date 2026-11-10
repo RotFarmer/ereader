@@ -59,14 +59,15 @@ object SketchRenderer {
         }
         c.save();c.rotate(r.rotation,dst.centerX(),dst.centerY());c.drawBitmap(b,src,dst,paint);c.restore()
     }
-    fun draw(c:Canvas,page:SketchPage,unit:Float,dark:Boolean,pressure:Float=0.75f,ink:InkPainter=InkPainter(),bitmap:(ReferenceLayer)->Bitmap?) {
+    /** [pixels] is screen pixels per page width at the current zoom (sizes the pencil's grain). */
+    fun draw(c:Canvas,page:SketchPage,unit:Float,dark:Boolean,pressure:Float=0.75f,ink:InkPainter=InkPainter(),pixels:Float=unit,bitmap:(ReferenceLayer)->Bitmap?) {
         val rect=RectF(0f,0f,1f,SketchGeometry.HEIGHT)
         SketchPaper.draw(c,rect,page.paper,1f/unit.coerceAtLeast(1f),dark,page.spacing)
         c.save();c.clipRect(rect)
         page.references.sortedBy { it.order }.forEach { r -> if(r.visible && !r.docked)bitmap(r)?.let { reference(c,r,it,dark) } }
         val painter=ink.apply { this.dark=dark;sensitivity=pressure }
         val placement=Placement(0f,0f,1f,null)
-        page.strokes.forEach { painter.draw(c,it,placement) }
+        page.strokes.forEach { painter.draw(c,it,placement,pixels) }
         c.restore()
     }
     fun thumbnail(dir:File,page:SketchPage,width:Int,dark:Boolean):Bitmap {

@@ -20,8 +20,12 @@ class SketchCanvas(context:Context,private val settings:Settings,private val ass
     var bookId=0L
     var pageId=0L
     var enabledForInput=true
-    var mode="Draw"
-        set(value){field=value;selected.clear();invalidate()}
+    var mode=DRAW
+        set(value){field=value;selected.clear();onSelectionChanged?.invoke();invalidate()}
+    /** Called whenever the lasso selection changes, so the screen can offer copy/delete. */
+    var onSelectionChanged:(()->Unit)?=null
+    val selectionCount get()=selected.size
+    val canPaste get()=clipboard.isNotEmpty()
     var partialEraser=false
     var referenceId:Long?=null
     /** Called with +1 / -1 when a finger swipes across the page at normal zoom. */
@@ -33,6 +37,7 @@ class SketchCanvas(context:Context,private val settings:Settings,private val ass
     private val matrix=Matrix();private val inverse=Matrix()
     private val painter=InkPainter()
     private val strokePaint=Paint(Paint.ANTI_ALIAS_FLAG).apply { style=Paint.Style.STROKE }
+    private val shadowPaint=Paint(Paint.ANTI_ALIAS_FLAG).apply { style=Paint.Style.FILL }
     private val main=Handler(Looper.getMainLooper());private val executor=Executors.newSingleThreadExecutor()
     /** Reference pictures at the resolution the current zoom needs, sized from the app's memory. */
     private val cacheBytes=(Runtime.getRuntime().maxMemory()/8).coerceIn(24L shl 20,96L shl 20).toInt()
@@ -60,17 +65,17 @@ class SketchCanvas(context:Context,private val settings:Settings,private val ass
     private var hover:PointF?=null
     fun setPage(value:SketchPage,info:PageInfo?=null) {
         page=value;working=null;gesturePage=null;live.clear();lasso.clear();index=SketchStrokeIndex(page.strokes)
-        if(info!=null) { pageId=info.id;bookId=info.book;zoom=info.zoom;pageRotation=info.rotation;panX=info.panX;panY=info.panY;selected.clear();referenceId=null;generation++;attempts.clear() }
+        if(info!=null) { pageId=info.id;bookId=info.book;zoom=info.zoom;pageRotation=info.rotation;panX=info.panX;panY=info.panY;selected.clear();referenceId=null;generation++;attempts.clear();onSelectionChanged?.invoke() }
         invalidate()
     }
     fun fit(){zoom=1f;pageRotation=0f;panX=0f;panY=0f;viewport(zoom,panX,panY,pageRotation);invalidate()}
     fun resetRotation(){pageRotation=0f;viewport(zoom,panX,panY,pageRotation);invalidate()}
     fun dispose(){disposed=true;generation++;executor.shutdownNow();bitmaps.evictAll();pending.clear()}
-    fun clearSelection(){selected.clear();invalidate()}
+    fun clearSelection(){selected.clear();onSelectionChanged?.invoke();invalidate()}
     fun copySelection(){clipboard=page.strokes.filter { it.id in selected }}
-    fun paste(){if(clipboard.isEmpty())return;val m=Matrix().apply { setTranslate(.03f,.03f) };val added=clipboard.map { SketchGeometry.transform(it,m).copy(id=SketchIds.next()) };selected.clear();selected.addAll(added.map { it.id });change(page.copy(strokes=page.strokes+added))}
+    fun paste(){if(clipboard.isEmpty())return;val m=Matrix().apply { setTranslate(.03f,.03f) };val added=clipboard.map { SketchGeometry.transform(it,m).copy(id=SketchIds.next()) };selected.clear();selected.addAll(added.map { it.id });change(page.copy(strokes=page.strokes+added));onSelectionChanged?.invoke()}
     fun duplicateSelection(){copySelection();paste()}
-    fun deleteSelection(){if(selected.isEmpty())return;change(page.copy(strokes=page.strokes.filterNot { it.id in selected }));selected.clear()}
+    fun deleteSelection(){if(selected.isEmpty())return;change(page.copy(strokes=page.strokes.filterNot { it.id in selected }));selected.clear();onSelectionChanged?.invoke()}
     private fun change(next:SketchPage) { val before=page;page=next;working=null;index=SketchStrokeIndex(page.strokes);commit(before,next);invalidate() }
     private fun updateMatrix() {
         unit=min(width-32f*resources.displayMetrics.density,(height-24f*resources.displayMetrics.density)/SketchGeometry.HEIGHT).coerceAtLeast(1f)
@@ -80,12 +85,16 @@ class SketchCanvas(context:Context,private val settings:Settings,private val ass
     private fun point(x:Float,y:Float):PointF { val p=floatArrayOf(x,y);inverse.mapPoints(p);return PointF(p[0],p[1]) }
     private fun bounds(strokes:List<InkStroke>):RectF { val r=RectF();strokes.forEachIndexed { i,s -> if(i==0)r.set(s.bounds) else r.union(s.bounds) };return r }
     override fun onDraw(c:Canvas) {
-        super.onDraw(c);updateMatrix();c.drawColor(if(settings.dark)0xFF101010.toInt() else 0xFFF2F0E9.toInt())
+        super.onDraw(c);updateMatrix();c.drawColor(if(settings.dark)0xFF0B0B0B.toInt() else 0xFFE4E1D8.toInt())
         c.save();c.concat(matrix)
+        // A soft shadow so the sheet sits on the desk.
+        val px=1f/(unit*zoom);val d=resources.displayMetrics.density
+        shadowPaint.color=if(settings.dark)0x66000000 else 0x1A000000
+        for(k in 1..3){val o=k*1.2f*d*px;c.drawRect(-o*.5f,o*.2f,1f+o*.5f,SketchGeometry.HEIGHT+o,shadowPaint)}
         val current=working ?: page
-        SketchRenderer.draw(c,current,unit,settings.dark,settings.pressure,painter) { ref -> bitmap(ref) }
+        SketchRenderer.draw(c,current,unit,settings.dark,settings.pressure,painter,unit*zoom) { ref -> bitmap(ref) }
         painter.dark=settings.dark;painter.sensitivity=settings.pressure
-        if(live.isNotEmpty()) painter.drawLive(c,live.toFloatArray(),live.size/3,gestureTool,settings.toolColor(gestureTool),widthUnits)
+        if(live.isNotEmpty()) painter.drawLive(c,live.toFloatArray(),live.size/3,gestureTool,settings.toolColor(gestureTool),widthUnits,unit*zoom)
         strokePaint.color=if(settings.dark)0xFFADC8BF.toInt() else 0xFF476A5D.toInt();strokePaint.strokeWidth=2f/(unit*zoom)
         if(lasso.size>1) { val p=Path();p.moveTo(lasso[0].x,lasso[0].y);lasso.drop(1).forEach { p.lineTo(it.x,it.y) };c.drawPath(p,strokePaint) }
         if(selected.isNotEmpty())drawHandles(c,bounds(current.strokes.filter { it.id in selected }))
@@ -217,11 +226,19 @@ class SketchCanvas(context:Context,private val settings:Settings,private val ass
     private fun finishPen() {
         if(mode=="Lasso" && gestureTool!=Tools.ERASER) {
             selected.clear();if(lasso.size>2)page.strokes.forEach { s -> if((s.pts.indices step 3).any { SketchGeometry.inside(s.pts[it],s.pts[it+1],lasso) })selected+=s.id }
+            onSelectionChanged?.invoke()
         } else if(gestureTool==Tools.ERASER)working?.let { change(it) }
         else if(live.isNotEmpty()) { val stroke=InkStroke(SketchIds.next(),bookId,Anchor(Anchor.PDF,pageId,0),gestureTool,settings.toolColor(gestureTool),widthUnits,live.toFloatArray(),System.currentTimeMillis());change(page.copy(strokes=page.strokes+stroke)) }
         live.clear();lasso.clear();gesturePage=null;working=null
     }
-    private companion object { const val ROTATE_THRESHOLD=15f;const val SNAP_DEGREES=8f }
+    companion object {
+        private const val ROTATE_THRESHOLD=15f;private const val SNAP_DEGREES=8f
+        const val DRAW="Draw";const val LASSO="Lasso"
+        const val LINE="Straightedge";const val ARROW="Arrow";const val RECTANGLE="Rectangle";const val ELLIPSE="Ellipse"
+        val SHAPES=listOf(LINE,ARROW,RECTANGLE,ELLIPSE)
+        /** Material icon for a shape mode, or null for freehand and lasso. */
+        fun shapeIcon(mode:String):String?=when(mode){LINE->"\uf108";ARROW->"\ue941";RECTANGLE->"\ue835";ELLIPSE->"\ue40c";else->null}
+    }
     private fun previewReference(ref:ReferenceLayer){working=page.copy(references=page.references.map { if(it.id==ref.id)ref else it })}
     private fun transform(now:PointF) {
         val ref=referenceStart;val rect=ref?.let { RectF(it.x,it.y,it.x+it.width,it.y+it.height) } ?: selectionStart
