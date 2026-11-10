@@ -314,6 +314,15 @@ class LibraryActivity : Activity() {
 
     private var syncingAll = false
 
+    /** Sketchbook work: a storage problem shows a message instead of closing the app. */
+    private fun sketchLaunch(block: suspend () -> Unit) {
+        scope.launch {
+            try { block() } catch (e: CancellationException) { throw e } catch (e: Exception) {
+                Toast.makeText(this@LibraryActivity, e.message ?: "Something went wrong", Toast.LENGTH_LONG).show()
+            }
+        }
+    }
+
     /** Brings shared sketchbooks up to date with changes from other devices, in the background. */
     private fun syncSharedSketchbooks() {
         if (syncingAll) return
@@ -323,7 +332,7 @@ class LibraryActivity : Activity() {
         scope.launch {
             var changed = false
             for (sb in shared) {
-                val r = withContext(SketchSync.dispatcher) { if (SketchSync.remoteChanged(app, sb.id)) SketchSync.sync(app, sb.id) else null }
+                val r = withContext(SketchSync.dispatcher) { if (SketchSync.due(app, sb.id)) SketchSync.sync(app, sb.id) else null }
                 if (r?.anything == true) changed = true
             }
             syncingAll = false
@@ -350,7 +359,7 @@ class LibraryActivity : Activity() {
         dialog(this, settings.dark).setTitle("New sketchbook").setView(box).setNegativeButton("Cancel", null)
             .setPositiveButton("Create") { _, _ ->
                 val name = input.text.toString().trim().ifEmpty { "Sketchbook" }
-                scope.launch {
+                sketchLaunch {
                     val id = withContext(SketchStore.io) { sketches.create(name) }
                     startActivity(SketchActivity.intent(this@LibraryActivity, id))
                 }
@@ -400,7 +409,7 @@ class LibraryActivity : Activity() {
                         dialog(this, settings.dark).setTitle("Rename sketchbook").setView(box).setNegativeButton("Cancel", null)
                             .setPositiveButton("Save") { _, _ ->
                                 val name = input.text.toString().trim()
-                                if (name.isNotEmpty()) scope.launch {
+                                if (name.isNotEmpty()) sketchLaunch {
                                     withContext(SketchStore.io) { sketches.rename(sb.id, name) }
                                     if (sb.shared) withContext(SketchSync.dispatcher) { SketchSync.sync(app, sb.id) }
                                     reload()
@@ -417,7 +426,7 @@ class LibraryActivity : Activity() {
                     }
                     3 -> dialog(this, settings.dark)
                         .setMessage(if (sb.shared) "Delete “${sb.title}” from this device? The shared file and your other devices keep it." else "Delete “${sb.title}” and everything drawn in it?")
-                        .setPositiveButton("Delete") { _, _ -> scope.launch { withContext(SketchStore.io) { sketches.delete(sb.id) }; reload() } }
+                        .setPositiveButton("Delete") { _, _ -> sketchLaunch { withContext(SketchStore.io) { sketches.delete(sb.id) }; reload() } }
                         .setNegativeButton("Cancel", null).show()
                 }
             }.show()

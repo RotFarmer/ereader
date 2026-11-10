@@ -76,9 +76,10 @@ class SketchView(context: Context, private val settings: Settings) : View(contex
     private var lastStylusTime = 0L
     private var hovering = false
     private var hoverX = 0f; private var hoverY = 0f; private var hoverButton = false
+    private var eraseX = 0f; private var eraseY = 0f
 
     // Finger state
-    private var fActive = false; private var fIgnore = false; private var fMulti = false
+    private var fActive = false; private var fIgnore = false; private var fMulti = false; private var pinched = false
     private var fDownX = 0f; private var fDownY = 0f; private var fLastX = 0f; private var fLastY = 0f
     private var pinchDist = 1f; private var pinchZoom = 1f; private var pinchPageX = 0f; private var pinchPageY = 0f
     private val slop = dp(8f)
@@ -142,7 +143,8 @@ class SketchView(context: Context, private val settings: Settings) : View(contex
         shadow.color = if (dark) 0x55000000 else 0x22000000
         val o = dp(1.2f) / zoom
         for (k in 1..3) c.drawRect(-o * k * 0.4f, o * k * 0.5f, w + o * k * 0.4f, h + o * k, shadow)
-        c.drawRenderNode(node)
+        if (c.isHardwareAccelerated) c.drawRenderNode(node)
+        else SketchRender.drawPage(c, w, paper, strokes, dark, settings.pressure, painter, max(1f, density * 0.6f))
         outline.color = if (dark) 0xFF2E2E2E.toInt() else 0xFFCFCAC0.toInt()
         outline.strokeWidth = dp(1f) / zoom
         c.drawRect(0f, 0f, w, h, outline)
@@ -157,11 +159,18 @@ class SketchView(context: Context, private val settings: Settings) : View(contex
             livePainter.drawLive(c, live, liveCount, tool, settings.toolColor(tool), dp(settings.toolWidth(tool)))
             c.restore()
         }
-        if ((hovering && (hoverButton || settings.tool == Tools.ERASER)) || (penErasing && liveCount > 0)) {
-            outline.color = if (dark) 0xFFBBBBBB.toInt() else 0xFF555555.toInt()
-            outline.strokeWidth = dp(1.2f)
-            val (x, y) = if (penErasing && liveCount > 0) live[(liveCount - 1) * 3] to live[(liveCount - 1) * 3 + 1] else hoverX to hoverY
-            c.drawCircle(x, y, dp(settings.toolWidth(Tools.ERASER)) / 2, outline)
+        outline.color = if (dark) 0xFFBBBBBB.toInt() else 0xFF555555.toInt()
+        outline.strokeWidth = dp(1.2f)
+        if (penErasing && penPointer != -1) {
+            c.drawCircle(eraseX, eraseY, dp(settings.toolWidth(Tools.ERASER)) / 2, outline)
+        } else if (hovering && penPointer == -1) {
+            if (hoverButton || settings.tool == Tools.ERASER) c.drawCircle(hoverX, hoverY, dp(settings.toolWidth(Tools.ERASER)) / 2, outline)
+            else {
+                // Where the pen will touch down.
+                val tool = settings.tool
+                shadow.color = com.rotfarmer.ereader.ink.InkColors.display(settings.toolColor(tool), dark)
+                c.drawCircle(hoverX, hoverY, max(dp(2f), dp(settings.toolWidth(tool)) / 2), shadow)
+            }
         }
     }
 
@@ -208,6 +217,13 @@ class SketchView(context: Context, private val settings: Settings) : View(contex
                     return true
                 }
                 if (penPointer != -1) {
+                    if (penIsFinger && stylus) {
+                        // A finger stroke was probably a resting hand: drop it, the pen draws.
+                        resetPen()
+                        cancelFinger()
+                        startPen(e, idx, samsung, finger = false)
+                        return true
+                    }
                     if (penIsFinger && !stylus) {
                         // A second finger while finger-drawing: a gesture, not a stroke.
                         cancelPen()
@@ -242,7 +258,7 @@ class SketchView(context: Context, private val settings: Settings) : View(contex
     private fun finger(e: MotionEvent, act: Int): Boolean {
         when (act) {
             MotionEvent.ACTION_DOWN -> {
-                fActive = true; fMulti = false
+                fActive = true; fMulti = false; pinched = false
                 fDownX = e.x; fDownY = e.y; fLastX = e.x; fLastY = e.y
                 fIgnore = palmLikely()
                 if (!fIgnore && settings.fingerDraw) startPen(e, 0, false, finger = true)
@@ -266,10 +282,14 @@ class SketchView(context: Context, private val settings: Settings) : View(contex
             }
             MotionEvent.ACTION_POINTER_UP -> {
                 // Keep panning with the finger that stays down, without a jump.
-                if (fMulti) { val keep = if (e.actionIndex == 0) 1 else 0; fLastX = e.getX(keep); fLastY = e.getY(keep) }
+                if (fMulti && e.pointerCount == 2) {
+                    val keep = if (e.actionIndex == 0) 1 else 0
+                    fLastX = e.getX(keep); fLastY = e.getY(keep)
+                    fMulti = false; pinched = true
+                }
             }
             MotionEvent.ACTION_UP -> {
-                if (fActive && !fIgnore && !fMulti && zoom <= 1.01f) {
+                if (fActive && !fIgnore && !fMulti && !pinched && zoom <= 1.01f) {
                     val dx = e.x - fDownX; val dy = e.y - fDownY
                     if (abs(dx) > max(dp(60f), width * 0.1f) && abs(dx) > abs(dy) * 1.4f) listener?.onTurn(if (dx < 0) 1 else -1)
                 }
@@ -282,7 +302,7 @@ class SketchView(context: Context, private val settings: Settings) : View(contex
 
     private fun startPinch(e: MotionEvent) {
         if (e.pointerCount < 2) return
-        fActive = true; fMulti = true; fIgnore = false
+        fActive = true; fMulti = true; fIgnore = false; pinched = true
         pinchDist = hypot(e.getX(0) - e.getX(1), e.getY(0) - e.getY(1)).coerceAtLeast(1f)
         pinchZoom = zoom
         val cx = (e.getX(0) + e.getX(1)) / 2; val cy = (e.getY(0) + e.getY(1)) / 2
@@ -359,8 +379,8 @@ class SketchView(context: Context, private val settings: Settings) : View(contex
     }
 
     private fun resetPen() {
+        if (penPointer != -1 && !penIsFinger) lastStylusTime = SystemClock.uptimeMillis()
         penPointer = -1; penErasing = false; penIsFinger = false; liveCount = 0
-        lastStylusTime = SystemClock.uptimeMillis()
         invalidate()
     }
 
@@ -386,6 +406,7 @@ class SketchView(context: Context, private val settings: Settings) : View(contex
     }
 
     private fun eraseAt(sx: Float, sy: Float) {
+        eraseX = sx; eraseY = sy
         val s = scale
         val x = (sx - originX) / s
         val y = (sy - originY) / s

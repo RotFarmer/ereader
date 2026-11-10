@@ -262,6 +262,8 @@ class SketchStore private constructor(context: Context) : SQLiteOpenHelper(conte
             bookId = remote.id
             remoteMeta = remote
             val local = meta(remote.id)
+            // Syncing a sketchbook that was deleted meanwhile must not bring it back.
+            if (local == null && expectedId != null) throw IOException("This sketchbook is no longer on this device")
             if (local == null) {
                 created = true
                 db.insertOrThrow("books", null, ContentValues().apply {

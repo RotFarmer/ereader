@@ -48,7 +48,10 @@ object SketchSync {
             val stamp = stamp(cr, uri)
             var result = Result(emptySet(), false)
             var fileBehind = false
-            if (force || stamp == null || stamp != lastStamp || syncedEdits < 0) {
+            val localChanges = editsAtStart != syncedEdits
+            // Always read the file before writing it: cloud folders can report a stale
+            // modification time, and writing blindly would drop another device's strokes.
+            if (force || localChanges || stamp == null || stamp != lastStamp || syncedEdits < 0) {
                 val copy = download(context, uri)
                 if (copy == null) fileBehind = true // a new, empty file: fill it
                 else try {
@@ -58,8 +61,14 @@ object SketchSync {
                 } finally { copy.delete() }
             }
             var newStamp = stamp
-            if (fileBehind || editsAtStart != syncedEdits) {
-                openForWriting(cr, uri).use { out -> store.write(bookId, out) }
+            if (fileBehind || localChanges) {
+                try {
+                    openForWriting(cr, uri).use { out -> store.write(bookId, out) }
+                } catch (e: SecurityException) {
+                    store.markSynced(bookId, syncedEdits, stamp)
+                    store.setSyncError(bookId, "This shared file can only be read here, so drawing on this device isn't saved to it. Changes from your other devices still arrive.")
+                    return result
+                }
                 newStamp = stamp(cr, uri)
             }
             store.markSynced(bookId, editsAtStart, newStamp)
@@ -76,10 +85,15 @@ object SketchSync {
         }
     }
 
-    /** True if the shared file may have changed since the last sync (a cheap check, no download). */
-    fun remoteChanged(context: Context, bookId: String): Boolean {
-        val (uriText, _, lastStamp) = SketchStore.of(context).syncInfo(bookId) ?: return false
+    /**
+     * True if a linked sketchbook should sync now: the shared file may have changed (a cheap
+     * check, no download), this device has changes not sent yet, or the last attempt failed.
+     */
+    fun due(context: Context, bookId: String): Boolean {
+        val store = SketchStore.of(context)
+        val (uriText, syncedEdits, lastStamp) = store.syncInfo(bookId) ?: return false
         val uri = Uri.parse(uriText ?: return false)
+        if (store.edits(bookId) != syncedEdits || store.get(bookId)?.syncError != null) return true
         return try { stamp(context.contentResolver, uri).let { it == null || it != lastStamp } } catch (e: Exception) { false }
     }
 

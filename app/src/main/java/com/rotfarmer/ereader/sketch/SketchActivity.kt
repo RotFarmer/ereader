@@ -60,7 +60,15 @@ class SketchActivity : Activity(), SketchView.Listener, PenToolbar.Callbacks {
     private val app by lazy { App.of(this) }
     private val settings get() = app.settings
     private val store by lazy { SketchStore.of(this) }
-    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
+    // A storage error shows a message instead of closing the app.
+    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main + kotlinx.coroutines.CoroutineExceptionHandler { _, e ->
+        main.post { toast(e.message ?: "Something went wrong") }
+    })
+
+    /** Saves run in the app's scope, so leaving the screen never drops a stroke that is still queued. */
+    private fun save(block: () -> Unit) {
+        App.io.launch(SketchStore.io) { try { block() } catch (e: Exception) { main.post { toast(e.message ?: "Couldn't save") } } }
+    }
     private val main = Handler(Looper.getMainLooper())
     private var ui = UiColors(false)
 
@@ -81,6 +89,9 @@ class SketchActivity : Activity(), SketchView.Listener, PenToolbar.Callbacks {
     private class Op(val added: List<InkStroke>, val removed: List<InkStroke>)
     private val undo = HashMap<Int, ArrayDeque<Op>>()
     private val redo = HashMap<Int, ArrayDeque<Op>>()
+    /** Erased stroke id → the copy an undo brought back in its place. */
+    private val restoredAs = HashMap<Long, Long>()
+    private fun current(id: Long): Long { var x = id; while (true) x = restoredAs[x] ?: return x }
 
     // ------------------------------------------------------------------ lifecycle
 
@@ -112,7 +123,10 @@ class SketchActivity : Activity(), SketchView.Listener, PenToolbar.Callbacks {
         main.removeCallbacks(poll)
         main.removeCallbacks(syncSoon)
         // Pass this visit's drawing on to the shared file; finishes even after the screen closes.
-        if (book?.shared == true) App.io.launch(SketchSync.dispatcher) { SketchSync.sync(app, bookId) }
+        if (book?.shared == true) App.io.launch {
+            withContext(SketchStore.io) {} // queued strokes first
+            withContext(SketchSync.dispatcher) { SketchSync.sync(app, bookId) }
+        }
     }
 
     override fun onDestroy() {
@@ -198,9 +212,14 @@ class SketchActivity : Activity(), SketchView.Listener, PenToolbar.Callbacks {
             setBackgroundColor(ui.bg)
             // Stay clear of a camera cutout at the top.
             setOnApplyWindowInsetsListener { v, ins ->
-                val cut = ins.getInsets(WindowInsets.Type.displayCutout())
-                v.setPadding(cut.left, cut.top, cut.right, 0)
-                view.insetTop = cut.top + dp(57); view.layoutPage()
+                val top: Int; val left: Int; val right: Int
+                if (Build.VERSION.SDK_INT >= 30) {
+                    val cut = ins.getInsets(WindowInsets.Type.displayCutout()); top = cut.top; left = cut.left; right = cut.right
+                } else {
+                    val cut = ins.displayCutout; top = cut?.safeInsetTop ?: 0; left = cut?.safeInsetLeft ?: 0; right = cut?.safeInsetRight ?: 0
+                }
+                v.setPadding(left, top, right, 0)
+                view.insetTop = top + dp(57); view.layoutPage()
                 ins
             }
         }
@@ -251,8 +270,9 @@ class SketchActivity : Activity(), SketchView.Listener, PenToolbar.Callbacks {
 
     private fun showPage(index: Int) {
         scope.launch {
-            val list = withContext(SketchStore.io) { store.setCurrentPage(bookId, index); store.strokes(bookId, index) }
+            val list = withContext(SketchStore.io) { store.strokes(bookId, index) }
             view.setPage(index, list)
+            save { store.setCurrentPage(bookId, index) }
             updateTitle(); updateUndo()
         }
     }
@@ -273,14 +293,14 @@ class SketchActivity : Activity(), SketchView.Listener, PenToolbar.Callbacks {
     override fun onStrokeAdded(stroke: InkStroke) {
         val page = view.page
         record(page, Op(listOf(stroke), emptyList()))
-        scope.launch(SketchStore.io) { store.addStrokes(bookId, page, listOf(stroke)) }
+        save { store.addStrokes(bookId, page, listOf(stroke)) }
         syncLater()
     }
 
     override fun onStrokesErased(strokes: List<InkStroke>) {
         val page = view.page
         record(page, Op(emptyList(), strokes))
-        scope.launch(SketchStore.io) { store.eraseStrokes(bookId, strokes.map { it.id }) }
+        save { store.eraseStrokes(bookId, strokes.map { it.id }) }
         syncLater()
     }
 
@@ -299,10 +319,14 @@ class SketchActivity : Activity(), SketchView.Listener, PenToolbar.Callbacks {
      * erased stroke stays erased on every device). Returns the operation that undoes this.
      */
     private fun invert(page: Int, op: Op): Op {
-        val again = op.removed.map { InkStroke(SketchStore.newStrokeId(), 0L, Anchor(Anchor.PDF, page.toLong(), 0), it.tool, it.color, it.width, it.pts, it.created) }
-        val gone = op.added.map { it.id }.toSet()
+        // Strokes restored by an earlier undo have new ids; follow them so older steps still apply.
+        val gone = op.added.map { current(it.id) }.toSet()
+        val again = op.removed.map {
+            InkStroke(SketchStore.newStrokeId(), 0L, Anchor(Anchor.PDF, page.toLong(), 0), it.tool, it.color, it.width, it.pts, it.created)
+                .also { copy -> restoredAs[current(it.id)] = copy.id }
+        }
         view.setStrokes(view.pageStrokes.filter { it.id !in gone } + again)
-        scope.launch(SketchStore.io) {
+        save {
             store.eraseStrokes(bookId, gone)
             store.addStrokes(bookId, page, again)
         }
@@ -357,8 +381,8 @@ class SketchActivity : Activity(), SketchView.Listener, PenToolbar.Callbacks {
     private val poll = object : Runnable {
         override fun run() {
             if (book?.shared == true && !syncing) scope.launch {
-                val changed = withContext(SketchSync.dispatcher) { SketchSync.remoteChanged(app, bookId) }
-                if (changed) syncNow()
+                val due = withContext(SketchSync.dispatcher) { SketchSync.due(app, bookId) }
+                if (due) syncNow()
             }
             main.postDelayed(this, POLL_MS)
         }
@@ -376,8 +400,7 @@ class SketchActivity : Activity(), SketchView.Listener, PenToolbar.Callbacks {
         if (b != null && !b.shared) return
         scope.launch {
             // Let strokes still being saved reach the database first.
-            withContext(SketchStore.io) {}
-            if (store.get(bookId)?.shared != true) return@launch
+            if (withContext(SketchStore.io) { store.get(bookId)?.shared } != true) return@launch
             syncing = true; updateTitle()
             val result = try { withContext(SketchSync.dispatcher) { SketchSync.sync(app, bookId, force) } } finally { syncing = false }
             afterChanges(result?.changedPages.orEmpty(), result?.metaChanged == true)
