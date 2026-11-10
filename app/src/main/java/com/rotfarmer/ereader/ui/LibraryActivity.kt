@@ -15,9 +15,7 @@ import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
-import android.text.Editable
 import android.text.TextUtils
-import android.text.TextWatcher
 import android.util.LruCache
 import android.view.Gravity
 import android.view.View
@@ -42,13 +40,6 @@ import com.rotfarmer.ereader.data.Excerpt
 import com.rotfarmer.ereader.data.ImportException
 import com.rotfarmer.ereader.data.Importer
 import com.rotfarmer.ereader.render.ReaderColors
-import com.rotfarmer.ereader.sketch.SketchActivity
-import com.rotfarmer.ereader.sketch.SketchStore
-import com.rotfarmer.ereader.sketch.Sketchbook
-import com.rotfarmer.ereader.sketch.SketchPage
-import com.rotfarmer.ereader.sketch.SketchPaper
-import com.rotfarmer.ereader.ink.InkPainter
-import com.rotfarmer.ereader.ink.Placement
 import com.rotfarmer.ereader.update.UpdateException
 import com.rotfarmer.ereader.update.Updater
 import android.provider.Settings as AndroidSettings
@@ -57,13 +48,10 @@ import android.widget.EditText
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
-import kotlinx.coroutines.CoroutineStart
-import com.rotfarmer.ereader.sketch.SketchRenderer
 import java.io.File
 import java.util.concurrent.Executors
 
@@ -78,21 +66,8 @@ class LibraryActivity : Activity() {
     private var status: TextView? = null
     private var books: List<Book> = emptyList()
     private var excerpts: List<Excerpt> = emptyList()
-    private val sketches by lazy { SketchStore.of(this) }
-    private var sketchbooks: List<Sketchbook> = emptyList()
-    private var libraryItems: List<LibraryItem> = emptyList()
-    private var visibleItems: List<LibraryItem> = emptyList()
-    private var searchQuery = ""
-    private var formatFilter = LibraryFilter.All
-    /** Must hold more previews than fit on screen, or showing one would evict another forever. */
-    private val sketchPreviews = object : LruCache<String, Bitmap>((Runtime.getRuntime().maxMemory() / 16).toInt().coerceAtLeast(16 shl 20)) {
-        override fun sizeOf(key: String, value: Bitmap) = value.allocationByteCount
-    }
-    private var grid: GridView? = null
-    private val previewJobs = HashMap<String, Job>()
-    private var previewGeneration = 0
     private var sortMode = 0
-    private val libraryAdapter = LibraryAdapter()
+    private val bookAdapter = BookAdapter()
     private val excerptAdapter = ExcerptAdapter()
 
     private val covers = object : LruCache<String, Bitmap>((Runtime.getRuntime().maxMemory() / 10).toInt()) {
@@ -184,13 +159,8 @@ class LibraryActivity : Activity() {
             }
         })
         header.addView(IconButton(this, Icons.ADD, ui).apply {
-            contentDescription = "Add books or sketchbooks"
-            setOnClickListener {
-                dialog(this@LibraryActivity, settings.dark)
-                    .setItems(arrayOf("Import books…", "New sketchbook", "Restore sketchbook backup", "Sketchbook Trash")) { _, i ->
-                        when(i){0->openPicker();1->createSketchbook();2->startActivityForResult(Intent(Intent.ACTION_OPEN_DOCUMENT).apply { type="application/zip";addCategory(Intent.CATEGORY_OPENABLE) },44);3->sketchTrash()}
-                    }.show()
-            }
+            contentDescription = "Add books"
+            setOnClickListener { openPicker() }
         })
         header.addView(IconButton(this, Icons.MORE, ui).apply {
             contentDescription = "More"
@@ -210,10 +180,7 @@ class LibraryActivity : Activity() {
         })
         root.addView(header)
 
-        // Tabs 2 (old Sketchbooks) is merged into the unified library: map saved 2 to 0.
-        val savedTab = if (settings.libraryTab == 2) 0 else settings.libraryTab.coerceIn(0, 1)
-        settings.libraryTab = savedTab
-        val tabs = Segmented(this, listOf("Library", "Excerpts"), savedTab, ui) {
+        val tabs = Segmented(this, listOf("Books", "Excerpts"), settings.libraryTab, ui) {
             settings.libraryTab = it; showTab()
         }
         root.addView(tabs, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply {
@@ -236,7 +203,26 @@ class LibraryActivity : Activity() {
 
     private fun showTab() {
         content.removeAllViews()
-        if (settings.libraryTab == 1) {
+        if (settings.libraryTab == 0) {
+            if (books.isEmpty()) {
+                content.addView(emptyView("Your library is empty", "Tap + to add EPUB, MOBI, PDF or Word (.docx) files.\nYou can also open them from your file manager with E-Reader."))
+                return
+            }
+            val grid = GridView(this).apply {
+                numColumns = GridView.AUTO_FIT
+                columnWidth = dp(150)
+                stretchMode = GridView.STRETCH_COLUMN_WIDTH
+                horizontalSpacing = dp(14)
+                verticalSpacing = dp(18)
+                setPadding(dp(16), dp(14), dp(16), dp(24))
+                clipToPadding = false
+                selector = android.graphics.drawable.ColorDrawable(Color.TRANSPARENT)
+                adapter = bookAdapter
+                setOnItemClickListener { _, _, pos, _ -> open(books[pos]) }
+                setOnItemLongClickListener { _, _, pos, _ -> bookMenu(books[pos]); true }
+            }
+            content.addView(grid)
+        } else {
             if (excerpts.isEmpty()) {
                 content.addView(emptyView("No excerpts yet", "While reading, long-press text (or a part of a PDF page) and choose Excerpt. Your excerpts from every book appear here."))
                 return
@@ -252,260 +238,32 @@ class LibraryActivity : Activity() {
                 setOnItemLongClickListener { _, _, pos, _ -> excerptMenu(excerpts[pos]); true }
             }
             content.addView(list)
-        } else {
-            showLibrary()
         }
     }
 
-    // ------------------------------------------------------------------ unified library
-
-    private fun showLibrary() {
-        libraryItems = LibraryItem.sorted(
-            books.map { LibraryItem.of(it) as LibraryItem } + sketchbooks.map { LibraryItem.of(it) as LibraryItem }, sortMode)
-        if (libraryItems.isEmpty()) {
-            content.addView(emptyView("Your library is empty", "Tap + to add EPUB, MOBI, PDF or Word (.docx) files.\nYou can also create a sketchbook."))
-            return
-        }
-        val column = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-        }
-        column.addView(libraryToolbar(), LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
-        content.addView(column, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
-        applyFilter()
-    }
-
-    /** Search box plus the format filter chips, both shared by books and sketchbooks. */
-    private fun libraryToolbar(): View {
-        val wrap = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            setPadding(dp(16), dp(2), dp(16), dp(8))
-        }
-        wrap.addView(EditText(this).apply {
-            hint = "Search titles"
-            setSingleLine()
-            setTextColor(ui.fg); setHintTextColor(ui.muted)
-            background = panelBg(context, ui, 8f, 1f, ui.bg)
-            setPadding(dp(10), dp(8), dp(10), dp(8))
-            setText(searchQuery)
-            addTextChangedListener(object : TextWatcher {
-                override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) {}
-                override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {}
-                override fun afterTextChanged(s: Editable) {
-                    if (s.toString() != searchQuery) {
-                        searchQuery = s.toString(); applyFilter()
-                    }
-                }
-            })
-        })
-        val chips = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
-        LibraryFilter.entries.forEachIndexed { index, f ->
-            chips.addView(TextButton(this, f.label, ui).apply {
-                active = f == formatFilter
-                setOnClickListener {
-                    formatFilter = f
-                    for (i in 0 until chips.childCount) (chips.getChildAt(i) as TextButton).active = i == index
-                    applyFilter()
-                }
-            }, LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { marginEnd = dp(6) })
-        }
-        wrap.addView(chips, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { topMargin = dp(6) })
-        return wrap
-    }
-
-    private fun libraryGrid(): GridView = GridView(this).apply {
-        grid = this
-        numColumns = GridView.AUTO_FIT
-        columnWidth = dp(150)
-        stretchMode = GridView.STRETCH_COLUMN_WIDTH
-        horizontalSpacing = dp(14)
-        verticalSpacing = dp(18)
-        setPadding(dp(16), dp(14), dp(16), dp(24))
-        clipToPadding = false
-        selector = android.graphics.drawable.ColorDrawable(Color.TRANSPARENT)
-        adapter = libraryAdapter
-        setOnItemClickListener { _, _, pos, _ ->
-            when (val item = visibleItems[pos]) {
-                is LibraryItem.BookItem -> open(item.book)
-                is LibraryItem.SketchbookItem -> startActivity(SketchActivity.intent(this@LibraryActivity, item.sketchbook.id))
-            }
-        }
-        setOnItemLongClickListener { _, _, pos, _ ->
-            when (val item = visibleItems[pos]) {
-                is LibraryItem.BookItem -> bookMenu(item.book)
-                is LibraryItem.SketchbookItem -> sketchMenu(item.sketchbook)
-            }
-            true
-        }
-    }
-
-    /** Reapplies the current search text and format filter to the library grid. */
-    private fun applyFilter() {
-        visibleItems = libraryItems.filter { formatFilter.matches(it) && it.matchesQuery(searchQuery) }
-        val column = content.getChildAt(0) as? LinearLayout ?: return
-        val body = if (column.childCount > 1) column.getChildAt(1) else null
-        when {
-            visibleItems.isEmpty() -> if (body !is LinearLayout) {
-                body?.let { column.removeView(it) }
-                column.addView(emptyView("Nothing matches", "Try a different title search or format filter.", actions = false),
-                    LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f))
-            }
-            else -> if (body !is GridView) {
-                body?.let { column.removeView(it) }
-                column.addView(libraryGrid(), LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f))
-            }
-        }
-        libraryAdapter.notifyDataSetChanged()
-    }
-
-    private fun createSketchbook() {
-        val input = EditText(this).apply {
-            setSingleLine(); setTextColor(ui.fg); setHintTextColor(ui.muted); hint = "Sketchbook name"
-        }
-        dialog(this, settings.dark).setTitle("New sketchbook · 350 pages").setView(input)
-            .setNegativeButton("Cancel", null).setPositiveButton("Create") { _, _ ->
-                val title = input.text.toString().trim().ifEmpty { "Untitled sketchbook" }
-                sketchAction({ sketches.create(title) }) { id ->
-                    reload()
-                    startActivity(SketchActivity.intent(this@LibraryActivity, id))
-                }
-            }.show()
-    }
-
-    private fun sketchMenu(sketch: Sketchbook) {
-        dialog(this, settings.dark).setTitle(sketch.title)
-            .setItems(arrayOf("Open", "Rename", "Move to Trash", "Duplicate")) { _, choice ->
-                when (choice) {
-                    0 -> startActivity(SketchActivity.intent(this, sketch.id))
-                    1 -> {
-                        val input = EditText(this).apply {
-                            setSingleLine(); setTextColor(ui.fg); setHintTextColor(ui.muted)
-                            setText(sketch.title); selectAll()
-                        }
-                        dialog(this, settings.dark).setTitle("Rename sketchbook").setView(input)
-                            .setNegativeButton("Cancel", null).setPositiveButton("Save") { _, _ ->
-                                val name = input.text.toString().trim()
-                                if (name.isNotEmpty()) sketchAction({ sketches.rename(sketch.id, name) }) { reload() }
-                            }.show()
-                    }
-                    2 -> sketchAction({ sketches.delete(sketch.id) }) { reload(); Toast.makeText(this@LibraryActivity, "Moved to Trash for 30 days", Toast.LENGTH_LONG).show() }
-                    3 -> sketchAction({ sketches.duplicate(sketch.id) }) { reload() }
-                }
-            }.show()
-    }
-
-    private fun sketchTrash() {
-        sketchAction({ sketches.trash() }) { items ->
-            if (items.isEmpty()) Toast.makeText(this, "Trash is empty", Toast.LENGTH_SHORT).show()
-            else dialog(this, settings.dark).setTitle("Restore sketchbook").setItems(items.map { it.title }.toTypedArray()) { _, index ->
-                sketchAction({ sketches.restore(items[index].id) }) { reload() }
-            }.show()
-        }
-    }
-
-    /**
-     * Runs a sketchbook database call off the main thread. A failure shows a message instead of
-     * crashing the library, which is also the only way into the user's books.
-     */
-    private fun <T> sketchAction(work: () -> T, done: (T) -> Unit) {
-        scope.launch {
-            val result = try { withContext(Dispatchers.IO) { work() } }
-            catch (e: CancellationException) { throw e }
-            catch (e: Exception) {
-                Toast.makeText(this@LibraryActivity, e.message ?: "Sketchbook storage isn't available", Toast.LENGTH_LONG).show()
-                return@launch
-            }
-            done(result)
-        }
-    }
-
-    private fun emptyView(title: String, body: String, actions: Boolean = true): View = LinearLayout(this).apply {
+    private fun emptyView(title: String, body: String): View = LinearLayout(this).apply {
         orientation = LinearLayout.VERTICAL
         gravity = Gravity.CENTER
         setPadding(dp(40), dp(40), dp(40), dp(80))
         addView(label(this@LibraryActivity, title, ui, 20f, bold = true, serif = true).apply { gravity = Gravity.CENTER })
         addView(label(this@LibraryActivity, body, ui, 15f, ui.muted).apply { gravity = Gravity.CENTER; setPadding(0, dp(10), 0, dp(20)) })
-        if (actions && settings.libraryTab == 0) {
-            addView(LinearLayout(this@LibraryActivity).apply {
-                orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER
-                addView(TextButton(this@LibraryActivity, "Add books", ui, filled = true).apply { setOnClickListener { openPicker() } },
-                    LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { marginEnd = dp(8) })
-                addView(TextButton(this@LibraryActivity, "New sketchbook", ui, filled = true).apply { setOnClickListener { createSketchbook() } },
-                    LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT))
-            })
-        }
-    }
-
-    private fun clearPreviewJobs() {
-        val jobs = previewJobs.entries.toList()
-        for (entry in jobs) {
-            entry.value.cancel()
-        }
-        previewJobs.clear()
-        sketchPreviews.evictAll()
-        previewGeneration++
+        if (settings.libraryTab == 0) addView(TextButton(this@LibraryActivity, "Add books", ui, filled = true).apply { setOnClickListener { openPicker() } })
     }
 
     private fun reload() {
         scope.launch {
             val (b, e) = withContext(Db.io) { app.db.books() to app.db.allExcerpts() }
-            // Sketchbooks live in their own database; a problem there must never hide the books.
-            val loaded = withContext(Dispatchers.IO) { runCatching { sketches.list() } }
-            loaded.exceptionOrNull()?.let { x ->
-                if (!sketchErrorShown) Toast.makeText(this@LibraryActivity, "Sketchbooks couldn't be loaded: ${x.message ?: "storage error"}", Toast.LENGTH_LONG).show()
-                sketchErrorShown = true
+            books = when (sortMode) {
+                1 -> b.sortedBy { it.title.lowercase() }
+                2 -> b.sortedWith(compareBy({ it.author.lowercase() }, { it.title.lowercase() }))
+                else -> b
             }
-            val s = loaded.getOrDefault(emptyList())
-            clearPreviewJobs()
-            books = b
             excerpts = e
-            sketchbooks = s
             showTab()
-            libraryAdapter.notifyDataSetChanged()
+            bookAdapter.notifyDataSetChanged()
             excerptAdapter.notifyDataSetChanged()
             checkCovers()
-            purgeSketchTrash()
         }
-    }
-
-    private var sketchErrorShown = false
-
-    /** Once a day, after the library is showing: empty the sketchbook Trash of items older than 30 days. */
-    private fun purgeSketchTrash() {
-        val now = System.currentTimeMillis()
-        if (now - settings.prefs.getLong("sketchCleanup", 0) < 24 * 3600_000L) return
-        settings.prefs.edit().putLong("sketchCleanup", now).apply()
-        scope.launch(Dispatchers.IO) { runCatching { sketches.purgeExpired(now) } }
-    }
-
-    // ------------------------------------------------------------------ sketch previews
-
-    /** Visible cards request bounded rendered thumbnails; page content never stays in the library cache. */
-    private fun requestPreview(item: LibraryItem.SketchbookItem) {
-        val key = item.key
-        if (previewJobs.containsKey(key) || sketchPreviews.get(key) != null) return
-        val generation = previewGeneration
-        val sketch = item.sketchbook
-        val job = scope.launch(start = CoroutineStart.LAZY) {
-            try {
-                val bitmap = withContext(Dispatchers.IO) {
-                    SketchRenderer.thumbnail(sketches.referencesDir, sketches.page(sketch.id, sketch.currentPage), 320, settings.dark)
-                }
-                if (generation != previewGeneration || isFinishing || isDestroyed) bitmap.recycle()
-                else {
-                    sketchPreviews.put(key, bitmap)
-                    // Update just the visible card: rebinding the whole grid could request
-                    // previews that were evicted, and so on in a loop.
-                    grid?.let { g -> for (i in 0 until g.childCount) {
-                        val cell = g.getChildAt(i) as? LinearLayout ?: continue
-                        if (cell.tag == key) (cell.getChildAt(0) as? SketchCoverView)?.preview = bitmap
-                    } }
-                }
-            } catch (e: CancellationException) { throw e }
-            catch (e: Exception) { /* A missing preview must not prevent opening the sketchbook. */ }
-            finally { if (previewJobs[key] === coroutineContext[Job]) previewJobs.remove(key) }
-        }
-        previewJobs[key] = job
-        job.start()
     }
 
     // ------------------------------------------------------------------ books
@@ -569,7 +327,7 @@ class LibraryActivity : Activity() {
                 Covers.markChecked(app, b.id)
                 if (changed) {
                     b.coverPath?.let { covers.remove(it) }
-                    libraryAdapter.notifyDataSetChanged()
+                    bookAdapter.notifyDataSetChanged()
                 }
             }
             coverCheckRunning = false
@@ -604,7 +362,7 @@ class LibraryActivity : Activity() {
                     withContext(Dispatchers.IO) { Covers.save(app, b, bmp) }
                     Covers.markChecked(app, b.id)
                     b.coverPath?.let { covers.remove(it) }
-                    libraryAdapter.notifyDataSetChanged()
+                    bookAdapter.notifyDataSetChanged()
                 }
             }.show()
     }
@@ -663,7 +421,7 @@ class LibraryActivity : Activity() {
                     withContext(Dispatchers.IO) { Covers.save(app, b, bmp) }
                     Covers.markChecked(app, b.id)
                     b.coverPath?.let { covers.remove(it) }
-                    libraryAdapter.notifyDataSetChanged()
+                    bookAdapter.notifyDataSetChanged()
                 }
                 withContext(Dispatchers.IO) { src.close() }
             }
@@ -688,7 +446,7 @@ class LibraryActivity : Activity() {
         (if (!x.note.isNullOrBlank()) "\nNote: ${x.note}" else "") + "\n— ${x.bookTitle}${if (x.label.isNotBlank()) ", ${x.label}" else ""}"
 
     private fun excerptMenu(x: Excerpt) {
-        dialog(this, settings.dark).setItems(arrayOf("Show in book", "Copy", "Share", "Delete", "Send to sketchbook")) { _, i ->
+        dialog(this, settings.dark).setItems(arrayOf("Show in book", "Copy", "Share", "Delete")) { _, i ->
             when (i) {
                 0 -> openExcerpt(x)
                 1 -> {
@@ -696,7 +454,6 @@ class LibraryActivity : Activity() {
                     if (Build.VERSION.SDK_INT < 33) Toast.makeText(this, "Copied", Toast.LENGTH_SHORT).show()
                 }
                 2 -> startActivity(Intent.createChooser(Intent(Intent.ACTION_SEND).setType("text/plain").putExtra(Intent.EXTRA_TEXT, excerptText(x)), "Share"))
-                4 -> com.rotfarmer.ereader.sketch.SketchLinks.send(this,x.bookId,x.start,x.text,x.imagePath,x.label)
                 3 -> scope.launch {
                     withContext(Db.io) {
                         app.db.deleteExcerpt(x.id); x.imagePath?.let { File(it).delete() }
@@ -734,13 +491,6 @@ class LibraryActivity : Activity() {
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
         @Suppress("DEPRECATION")
         super.onActivityResult(requestCode, resultCode, data)
-        if(requestCode==44 && resultCode==RESULT_OK) {
-            val uri=data?.data ?: return
-            scope.launch { try {
-                val id=withContext(Dispatchers.IO){contentResolver.openInputStream(uri)?.use { com.rotfarmer.ereader.sketch.SketchArchive.restore(sketches,it) } ?: error("Could not open backup")}
-                reload();startActivity(SketchActivity.intent(this@LibraryActivity,id))
-            }catch(e:Exception){Toast.makeText(this@LibraryActivity,e.message ?: "Restore failed",Toast.LENGTH_LONG).show()} };return
-        }
         if (requestCode != reqOpen || resultCode != RESULT_OK || data == null) return
         val uris = ArrayList<Uri>()
         data.clipData?.let { cd -> for (k in 0 until cd.itemCount) uris += cd.getItemAt(k).uri }
@@ -970,94 +720,40 @@ class LibraryActivity : Activity() {
         }
     }
 
-    private inner class SketchCoverView(ctx: Context) : View(ctx) {
-        var preview: Bitmap? = null
-            set(value) { field = value; invalidate() }
-        private val paint = Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG)
-        override fun onMeasure(widthMeasureSpec: Int, heightMeasureSpec: Int) {
-            val w = MeasureSpec.getSize(widthMeasureSpec)
-            setMeasuredDimension(w, (w * 1.5f).toInt())
-        }
-        override fun onDraw(canvas: Canvas) {
-            val w = width.toFloat()
-            val paperW = w - dp(2)
-            val paperH = paperW / 0.707f
-            val top = (height - paperH) / 2f
-            val rect = android.graphics.RectF(dp(1).toFloat(), top, w - dp(1), top + paperH)
-            val bitmap = preview
-            if (bitmap == null) SketchPaper.draw(canvas, rect, 0, resources.displayMetrics.density, settings.dark)
-            else canvas.drawBitmap(bitmap, null, rect, paint)
-        }
-    }
-
-    private fun makeBookCell(): LinearLayout = LinearLayout(this).apply {
-        orientation = LinearLayout.VERTICAL
-        layoutParams = AbsListView.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
-        addView(CoverView(context).apply {
-            scaleType = ImageView.ScaleType.CENTER_CROP
-            background = panelBg(context, ui, 2f, 1f, ui.soft)
-            setPadding(dp(1), dp(1), dp(1), dp(1))
-            tag = "cover"
-        })
-        addView(ProgressLine(context, ui.fg, ui.hairline).apply { tag = "bar" }, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(3)).apply { topMargin = dp(6) })
-        addView(label(context, "", ui, 14.5f, serif = true).apply {
-            maxLines = 2; ellipsize = TextUtils.TruncateAt.END; setPadding(0, dp(6), 0, 0); tag = "title"
-        })
-        addView(label(context, "", ui, 12f, ui.muted).apply { maxLines = 1; ellipsize = TextUtils.TruncateAt.END; tag = "sub" })
-    }
-
-    private fun bindBookCell(cell: LinearLayout, b: Book) {
-        loadCover(b.coverPath, cell.getChildAt(0) as ImageView)
-        (cell.getChildAt(1) as ProgressLine).apply { progress = b.progress; invalidate() }
-        (cell.getChildAt(2) as TextView).text = b.title
-        val pct = (b.progress * 100).toInt()
-        val state = when {
-            b.opened == 0L -> "New"
-            pct >= 99 -> "Finished"
-            else -> "$pct%"
-        }
-        (cell.getChildAt(3) as TextView).text = listOf(b.author, state).filter { it.isNotBlank() }.joinToString(" · ")
-    }
-
-    private fun makeSketchCell(): LinearLayout = LinearLayout(this).apply {
-        orientation = LinearLayout.VERTICAL
-        layoutParams = AbsListView.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
-        addView(SketchCoverView(context))
-        addView(ProgressLine(context, ui.fg, ui.hairline), LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(3)).apply { topMargin = dp(6) })
-        addView(label(context, "", ui, 14.5f, serif = true).apply {
-            maxLines = 2; ellipsize = TextUtils.TruncateAt.END; setPadding(0, dp(6), 0, 0)
-        })
-        addView(label(context, "", ui, 12f, ui.muted).apply { maxLines = 1 })
-    }
-
-    private fun bindSketchCell(cell: LinearLayout, item: LibraryItem.SketchbookItem) {
-        cell.tag = item.key
-        (cell.getChildAt(0) as SketchCoverView).preview = sketchPreviews.get(item.key)
-        requestPreview(item)
-        (cell.getChildAt(1) as ProgressLine).apply { progress = (item.sketchbook.currentPage + 1f) / item.sketchbook.pageCount; invalidate() }
-        (cell.getChildAt(2) as TextView).text = item.sketchbook.title
-        (cell.getChildAt(3) as TextView).text = "Sketchbook · Page ${item.sketchbook.currentPage + 1} · ${item.sketchbook.pageCount} pages"
-    }
-
-    /** One mixed adapter: book and sketchbook cards share the same layout shape. */
-    private inner class LibraryAdapter : BaseAdapter() {
-        override fun getCount() = visibleItems.size
-        override fun getItem(position: Int) = visibleItems[position]
-        override fun getItemId(position: Int): Long = when (val item = visibleItems[position]) {
-            is LibraryItem.BookItem -> item.book.id shl 1
-            is LibraryItem.SketchbookItem -> (item.sketchbook.id shl 1) or 1
-        }
+    private inner class BookAdapter : BaseAdapter() {
+        override fun getCount() = books.size
+        override fun getItem(position: Int) = books[position]
+        override fun getItemId(position: Int) = books[position].id
 
         override fun getView(position: Int, convertView: View?, parent: ViewGroup?): View {
-            val item = visibleItems[position]
-            val isBook = item is LibraryItem.BookItem
-            val first = (convertView as? LinearLayout)?.getChildAt(0)
-            val cell = if (first != null && ((first is ImageView) == isBook)) convertView as LinearLayout
-            else if (isBook) makeBookCell() else makeSketchCell()
-            when (item) {
-                is LibraryItem.BookItem -> bindBookCell(cell, item.book)
-                is LibraryItem.SketchbookItem -> bindSketchCell(cell, item)
+            val b = books[position]
+            val cell = (convertView as? LinearLayout) ?: LinearLayout(this@LibraryActivity).apply {
+                orientation = LinearLayout.VERTICAL
+                layoutParams = AbsListView.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
+                val cover = CoverView(context).apply {
+                    scaleType = ImageView.ScaleType.CENTER_CROP
+                    background = panelBg(context, ui, 2f, 1f, ui.soft)
+                    setPadding(dp(1), dp(1), dp(1), dp(1))
+                    tag = "cover"
+                }
+                addView(cover)
+                addView(ProgressLine(context, ui.fg, ui.hairline).apply { tag = "bar" }, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(3)).apply { topMargin = dp(6) })
+                addView(label(context, "", ui, 14.5f, serif = true).apply {
+                    maxLines = 2; ellipsize = TextUtils.TruncateAt.END; setPadding(0, dp(6), 0, 0); tag = "title"
+                })
+                addView(label(context, "", ui, 12f, ui.muted).apply { maxLines = 1; ellipsize = TextUtils.TruncateAt.END; tag = "sub" })
             }
+            val cover = cell.getChildAt(0) as ImageView
+            loadCover(b.coverPath, cover)
+            (cell.getChildAt(1) as ProgressLine).apply { progress = b.progress; invalidate() }
+            (cell.getChildAt(2) as TextView).text = b.title
+            val pct = (b.progress * 100).toInt()
+            val state = when {
+                b.opened == 0L -> "New"
+                pct >= 99 -> "Finished"
+                else -> "$pct%"
+            }
+            (cell.getChildAt(3) as TextView).text = listOf(b.author, state).filter { it.isNotBlank() }.joinToString(" · ")
             return cell
         }
     }

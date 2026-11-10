@@ -173,22 +173,21 @@ class InkPainter {
     private val grain = BitmapShader(Eink.grainTile(), Shader.TileMode.REPEAT, Shader.TileMode.REPEAT)
     private val grainMatrix = Matrix()
 
-    /** [pixels]: screen pixels per stroke unit, when the canvas is already scaled (sizes the pencil grain). */
-    fun draw(c: Canvas, s: InkStroke, pl: Placement, pixels: Float = pl.unit) {
+    fun draw(c: Canvas, s: InkStroke, pl: Placement) {
         val shape = s.shape ?: StrokeGeometry.build(s.pts, s.count, s.tool, s.width, sensitivity).also { s.shape = it }
         c.save()
         pl.clip?.let { c.clipRect(it) }
         c.translate(pl.ox, pl.oy)
         c.scale(pl.unit, pl.unit)
-        c.drawPath(shape.path, paint(s.tool, s.color, s.width, shape, pixels))
+        c.drawPath(shape.path, paint(s.tool, s.color, s.width, shape, pl.unit))
         c.restore()
     }
 
-    /** Draws a stroke that is still being written, in screen pixels (or [pixels] per unit on a scaled canvas). */
-    fun drawLive(c: Canvas, pts: FloatArray, count: Int, tool: Int, color: Int, width: Float, pixels: Float = 1f) {
+    /** Draws a stroke that is still being written, in screen pixels. */
+    fun drawLive(c: Canvas, pts: FloatArray, count: Int, tool: Int, color: Int, width: Float) {
         if (count == 0) return
         val shape = StrokeGeometry.build(pts, count, tool, width, sensitivity)
-        c.drawPath(shape.path, paint(tool, color, width, shape, pixels))
+        c.drawPath(shape.path, paint(tool, color, width, shape, 1f))
     }
 
     private fun paint(tool: Int, color: Int, width: Float, shape: StrokeShape, unit: Float): Paint {
@@ -220,12 +219,6 @@ class InkPainter {
                 grainMatrix.setScale(1f / unit, 1f / unit)
                 grain.setLocalMatrix(grainMatrix)
                 shader = grain
-            }
-            Tools.SOFT_BRUSH -> fill.apply {
-                blendMode = null
-                shader = null
-                val a = (Color.alpha(col) * 0.4f).toInt().coerceAtMost(110)
-                this.color = (col and 0x00FFFFFF) or (a shl 24)
             }
             else -> fill.apply {
                 blendMode = null

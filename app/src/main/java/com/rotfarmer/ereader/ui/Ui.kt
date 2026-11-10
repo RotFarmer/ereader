@@ -294,7 +294,6 @@ class Overlay(private val root: FrameLayout) {
     fun show(
         content: View, anchor: RectF?, below: Boolean = true, onDismiss: (() -> Unit)? = null,
         maxWidthDp: Int = 420, alignRight: Boolean = false, passThrough: ((MotionEvent) -> Boolean)? = null,
-        alignLeft: Boolean = false,
     ) {
         val ctx = root.context
         val scrim = object : View(ctx) {
@@ -325,11 +324,7 @@ class Overlay(private val root: FrameLayout) {
             lp.leftMargin = (root.width - w) / 2
             lp.topMargin = ((root.height - h) / 2).coerceAtLeast(m)
         } else {
-            val x = when {
-                alignRight -> anchor.right - w
-                alignLeft -> anchor.left
-                else -> anchor.centerX() - w / 2f
-            }
+            val x = if (alignRight) anchor.right - w else anchor.centerX() - w / 2f
             lp.leftMargin = x.toInt().coerceIn(m, (root.width - w - m).coerceAtLeast(m))
             var y = if (below) anchor.bottom + m else anchor.top - h - m
             if (below && y + h > root.height - m) y = anchor.top - h - m

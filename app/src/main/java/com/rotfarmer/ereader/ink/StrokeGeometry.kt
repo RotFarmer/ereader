@@ -20,8 +20,6 @@ object StrokeGeometry {
             Tools.CALLIGRAPHY -> 0.55f + 0.75f * pp
             Tools.PENCIL -> 0.6f + 0.65f * pp
             Tools.MARKER -> 0.85f + 0.3f * pp
-            Tools.BRUSH -> 0.12f + 1.45f * pp.pow(1.2f)
-            Tools.SOFT_BRUSH -> 0.45f + 0.85f * pp
             else -> 1f
         }
         return 1f + (curve - 1f) * sensitivity.coerceIn(0f, 1f)

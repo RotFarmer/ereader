@@ -10,9 +10,7 @@ import android.view.Gravity
 import android.view.View
 import android.widget.GridLayout
 import android.widget.LinearLayout
-import android.widget.ScrollView
 import com.rotfarmer.ereader.data.Settings
-import com.rotfarmer.ereader.ink.InkColors
 import com.rotfarmer.ereader.ink.InkPainter
 import com.rotfarmer.ereader.ink.Tools
 import kotlin.math.PI
@@ -78,8 +76,7 @@ class PenSample(ctx: Context, var tool: Int, var color: Int, var widthDp: Float,
  * Tapping the selected pen again opens its color and width options.
  */
 @SuppressLint("ViewConstructor")
-class PenToolbar(ctx: Context, private val c: UiColors, private val settings: Settings, private val cb: Callbacks,
-                 private val showInsertSpace: Boolean = true) : LinearLayout(ctx) {
+class PenToolbar(ctx: Context, private val c: UiColors, private val settings: Settings, private val cb: Callbacks) : LinearLayout(ctx) {
     interface Callbacks {
         fun onToolChanged()
         fun onToolOptions(anchor: View)
@@ -134,17 +131,15 @@ class PenToolbar(ctx: Context, private val c: UiColors, private val settings: Se
         for (t in Tools.DRAWING) addView(sample(t))
         addView(sample(Tools.ERASER))
         addView(sep())
-        if (showInsertSpace) {
-            insertBtn = IconButton(context, "", c, 44).apply {
-                active = insertArmed
-                contentDescription = "Insert writing space"
-                setOnClickListener {
-                    insertArmed = !insertArmed
-                    cb.onInsertSpace(insertArmed)
-                }
+        insertBtn = IconButton(context, "", c, 44).apply {
+            active = insertArmed
+            contentDescription = "Insert writing space"
+            setOnClickListener {
+                insertArmed = !insertArmed
+                cb.onInsertSpace(insertArmed)
             }
-            addView(insertBtn)
         }
+        addView(insertBtn)
         colorDot = ColorDot(context, currentColor(), c).apply {
             layoutParams = LayoutParams(dp(44), dp(40))
             contentDescription = "Color and size"
@@ -169,11 +164,7 @@ class PenToolbar(ctx: Context, private val c: UiColors, private val settings: Se
 
     private fun currentColor(): Int {
         val t = settings.tool
-        return when (t) {
-            Tools.ERASER -> c.muted
-            Tools.HIGHLIGHTER -> settings.toolColor(t)
-            else -> InkColors.display(settings.toolColor(t), c.dark)
-        }
+        return if (t == Tools.ERASER) c.muted else settings.toolColor(t)
     }
 
     private fun sep() = View(context).apply {
@@ -184,12 +175,7 @@ class PenToolbar(ctx: Context, private val c: UiColors, private val settings: Se
     private fun sample(t: Int): PenSample {
         val s = PenSample(context, t, if (t == Tools.ERASER) c.fg else settings.toolColor(t), settings.toolWidth(t), c, settings.pressure)
         s.layoutParams = LayoutParams(dp(46), dp(40))
-        s.maxWidthDp = when (t) {
-            Tools.HIGHLIGHTER -> 10f
-            Tools.BRUSH -> 7f
-            Tools.SOFT_BRUSH -> 9f
-            else -> 5f
-        }
+        s.maxWidthDp = if (t == Tools.HIGHLIGHTER) 10f else 5f
         s.selected2 = t == settings.tool
         s.contentDescription = Tools.name(t)
         s.setOnClickListener {
@@ -220,17 +206,6 @@ class PenToolbar(ctx: Context, private val c: UiColors, private val settings: Se
             build(); return
         }
         colorDot?.let { it.color = currentColor(); it.invalidate() }
-    }
-
-    /**
-     * The toolbar inside a vertical scroller, so that on a short screen (landscape, or with
-     * the brush pens shown) the bottom buttons scroll into view instead of being cut off.
-     */
-    fun scrollable(): ScrollView = ScrollView(context).apply {
-        isVerticalScrollBarEnabled = false
-        overScrollMode = View.OVER_SCROLL_NEVER
-        isFillViewport = false
-        addView(this@PenToolbar, android.widget.FrameLayout.LayoutParams(android.widget.FrameLayout.LayoutParams.WRAP_CONTENT, android.widget.FrameLayout.LayoutParams.WRAP_CONTENT))
     }
 
     fun setUndoState(canUndo: Boolean, canRedo: Boolean) {

@@ -517,7 +517,6 @@ class ReaderActivity : Activity(), ReaderView.Listener, PenToolbar.Callbacks {
         }, LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { marginEnd = dp(6) })
         val text = session?.flow?.textBetween(sel.start, sel.end).orEmpty()
         btn("Excerpt") { saveExcerpt(sel.start, sel.end, text) }
-        btn("Sketchbook") { session?.let { com.rotfarmer.ereader.sketch.SketchLinks.send(this,it.book.id,sel.start,text,null,it.book.title) } }
         btn("Copy") { copy(text) }
         btn("Share") { share(text) }
         btn("Look up") { lookUp(text) }
@@ -551,7 +550,6 @@ class ReaderActivity : Activity(), ReaderView.Listener, PenToolbar.Callbacks {
             setOnClickListener { popups.dismissAll(); f() }
         }, LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { marginEnd = dp(6) })
         btn("Excerpt") { saveExcerpt(h.start, h.end, h.text) }
-        btn("Sketchbook") { com.rotfarmer.ereader.sketch.SketchLinks.send(this,s.book.id,h.start,h.text,null,s.book.title) }
         btn("Note") { editNote(h.note) { n -> h.note = n; s.updateHighlight(h) } }
         btn("Copy") { copy(h.text) }
         btn("Delete") {
@@ -569,7 +567,6 @@ class ReaderActivity : Activity(), ReaderView.Listener, PenToolbar.Callbacks {
             setOnClickListener { popups.dismissAll(); f() }
         }, LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { marginEnd = dp(6) })
         btn("Save excerpt") { savePdfExcerpt(page, RectF(region)) }
-        btn("Sketchbook") { sendPdfToSketchbook(page,RectF(region)) }
         if (PdfDoc.textSupported) btn("Copy text") { copyPdfText(page, RectF(region)) }
         btn("Highlight") { highlightRegion(page, RectF(region)) }
         c.addView(label(this, "Drag the corners to adjust", ui, 12f, ui.muted).apply { setPadding(dp(4), 0, 0, dp(6)) }, 0)
@@ -998,7 +995,7 @@ class ReaderActivity : Activity(), ReaderView.Listener, PenToolbar.Callbacks {
     }
 
     private fun buildToolbar() {
-        toolbar?.let { root.removeView(it.parent as? View ?: it) }
+        toolbar?.let { root.removeView(it) }
         toolbar = null
         if (!settings.toolbarVisible) return
         val tb = PenToolbar(this, ui, settings, this)
@@ -1006,7 +1003,7 @@ class ReaderActivity : Activity(), ReaderView.Listener, PenToolbar.Callbacks {
             Gravity.CENTER_VERTICAL or if (settings.toolbarRight) Gravity.END else Gravity.START)
         lp.marginStart = dp(6); lp.marginEnd = dp(6)
         val idx = topBar?.let { root.indexOfChild(chromeScrim) } ?: root.childCount
-        root.addView(tb.scrollable(), idx.coerceAtMost(root.childCount), lp)
+        root.addView(tb, idx.coerceAtMost(root.childCount), lp)
         tb.insertArmed = view.armedInsert
         toolbar = tb
         updateUndo()
@@ -1235,13 +1232,12 @@ class ReaderActivity : Activity(), ReaderView.Listener, PenToolbar.Callbacks {
             if (r != null) view.showLocateRegion(x.start.block, r) else view.showLocate(x.start, x.end)
         }
         row.setOnLongClickListener {
-            menu(listOf("Edit note", "Copy", "Share", "Delete", "Send to sketchbook")) { i ->
+            menu(listOf("Edit note", "Copy", "Share", "Delete")) { i ->
                 when (i) {
                     0 -> editNote(x.note) { n -> x.note = n; s.updateExcerpt(x); fillNotebook(list) }
                     1 -> copy(excerptText(x))
                     2 -> share(excerptText(x))
                     3 -> confirm("Delete this excerpt?") { s.deleteExcerpt(x); fillNotebook(list) }
-                    4 -> com.rotfarmer.ereader.sketch.SketchLinks.send(this,x.bookId,x.start,x.text,x.imagePath,x.label)
                 }
             }; true
         }
@@ -1513,20 +1509,6 @@ class ReaderActivity : Activity(), ReaderView.Listener, PenToolbar.Callbacks {
                     text, null, path, RectF(region), label, System.currentTimeMillis())
             )
             toast("Saved to excerpts")
-        }
-    }
-
-    private fun sendPdfToSketchbook(page:Int,region:RectF) {
-        val s=session ?: return;val pdf=s.pdf ?: return
-        scope.launch {
-            try {
-                val file=withContext(Dispatchers.IO) {
-                    val f=File(com.rotfarmer.ereader.sketch.SketchLinks.tempDir(this@ReaderActivity),"sketch-${Ids.next()}.png")
-                    val bitmap=pdf.renderRegion(page,region,1600)
-                    try { f.outputStream().use { check(bitmap.compress(android.graphics.Bitmap.CompressFormat.PNG,100,it)) } }finally{bitmap.recycle()};f
-                }
-                com.rotfarmer.ereader.sketch.SketchLinks.send(this@ReaderActivity,s.book.id,Locator(page,(region.top*10000).toInt()),null,file.path,"${s.book.title} · Page ${page+1}")
-            }catch(e:Exception){toast(e.message ?: "Could not copy this PDF region")}
         }
     }
 
