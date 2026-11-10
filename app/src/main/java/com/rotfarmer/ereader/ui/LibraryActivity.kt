@@ -440,8 +440,11 @@ class LibraryActivity : Activity() {
         if (!thumbsLoading.add(key)) return
         scope.launch {
             val bmp = try {
-                val strokes = withContext(SketchStore.io) { sketches.strokes(sb.id, sketches.latestPage(sb.id) ?: sb.currentPage) }
-                withContext(Dispatchers.Default) { SketchRender.bitmap(dp(150), sb.paper, strokes, settings.dark, settings.pressure) }
+                val (strokes, items) = withContext(SketchStore.io) {
+                    val page = sketches.latestPage(sb.id) ?: sb.currentPage
+                    sketches.strokes(sb.id, page) to sketches.items(sb.id, page)
+                }
+                withContext(Dispatchers.Default) { SketchRender.bitmap(dp(150), sb.paper, strokes, settings.dark, settings.pressure, items, sketches) }
             } catch (e: CancellationException) { throw e } catch (e: Exception) { null }
             thumbsLoading.remove(key)
             if (bmp != null) {

@@ -9,6 +9,7 @@ import java.io.FilterOutputStream
 import java.io.IOException
 import java.io.InputStream
 import java.io.OutputStream
+import java.util.zip.CRC32
 import java.util.zip.ZipEntry
 import java.util.zip.ZipInputStream
 import java.util.zip.ZipOutputStream
@@ -36,12 +37,39 @@ class SketchStrokeRecord(
 )
 
 /**
+ * A picture, or a page of a document, placed on a sketchbook page under the drawing. [asset] names
+ * the stored file (its SHA-256 and extension); [sourcePage] is the document page (0 for pictures).
+ * Position and size are in page units. [time] is the last change (for merging); [deleted] is when
+ * it was removed, or 0.
+ */
+data class SketchItem(
+    val id: Long,
+    val page: Int,
+    val kind: Int,
+    val asset: String,
+    val sourcePage: Int,
+    val x: Float,
+    val y: Float,
+    val w: Float,
+    val h: Float,
+    val created: Long,
+    val time: Long,
+    val deleted: Long = 0L,
+) {
+    companion object {
+        const val PICTURE = 0
+        const val DOCUMENT = 1
+    }
+}
+
+/**
  * The `.sketchbook` file: the whole sketchbook in one zip, used both for "Send a copy" and as the
  * shared file that devices keep in sync.
  *
  * Strokes never change once drawn; erasing a stroke records its id as deleted. So merging two
- * copies is just: every stroke either side has, minus every stroke either side deleted. Nothing
- * is lost when two devices draw at the same time, and the copies always end up the same.
+ * copies is just: every stroke either side has, minus every stroke either side deleted. Placed
+ * pictures can move, so the most recent change to each wins, and a removed one stays removed.
+ * Nothing is lost when two devices draw at the same time, and the copies always end up the same.
  *
  * Plain Java streams only (no Android classes), so it can be tested on any JVM.
  */
@@ -51,14 +79,31 @@ object SketchFile {
     const val MAX_PAGES = 10000
 
     private const val MAGIC = "E-Reader sketchbook"
-    private const val VERSION = 1
+    /** 1: drawing only. 2: adds placed pictures and documents (only written when there are any). */
+    private const val VERSION = 2
     private const val META = "sketchbook"
     private const val DELETED = "deleted"
     private const val STROKES = "strokes"
+    private const val ITEMS = "items"
+    private const val ASSET_PREFIX = "assets/"
     private const val MAX_POINTS = 200_000
+    private val ASSET_NAME = Regex("[0-9a-f]{64}\\.(pdf|jpg|png|webp)")
 
-    /** Writes a complete sketchbook. [strokes] and [deleted] (id, time) are streamed, not held in memory. */
-    fun write(out: OutputStream, meta: SketchMeta, deleted: (emit: (Long, Long) -> Unit) -> Unit, strokes: (emit: (SketchStrokeRecord) -> Unit) -> Unit) {
+    fun isAssetName(name: String) = ASSET_NAME.matches(name)
+
+    /**
+     * Writes a complete sketchbook. [strokes] and [deleted] (id, time) are streamed, not held in
+     * memory. [items] includes removed ones (so other devices learn of the removal); [assets]
+     * hands over each stored file the remaining items use, by name.
+     */
+    fun write(
+        out: OutputStream,
+        meta: SketchMeta,
+        deleted: (emit: (Long, Long) -> Unit) -> Unit,
+        strokes: (emit: (SketchStrokeRecord) -> Unit) -> Unit,
+        items: List<SketchItem> = emptyList(),
+        assets: List<Pair<String, () -> InputStream>> = emptyList(),
+    ) {
         // Never close the caller's stream; a plain FilterOutputStream would write byte by byte.
         val keepOpen = object : FilterOutputStream(out) {
             override fun write(b: ByteArray, off: Int, len: Int) = out.write(b, off, len)
@@ -67,7 +112,8 @@ object SketchFile {
         ZipOutputStream(BufferedOutputStream(keepOpen, 1 shl 16)).use { zip ->
             zip.putNextEntry(ZipEntry(META))
             DataOutputStream(zip).run {
-                writeUTF(MAGIC); writeInt(VERSION)
+                // Sketchbooks without pictures stay readable by older versions of the app.
+                writeUTF(MAGIC); writeInt(if (items.isEmpty()) 1 else VERSION)
                 writeUTF(meta.id); writeUTF(meta.title); writeLong(meta.titleTime)
                 writeInt(meta.paper); writeLong(meta.paperTime); writeInt(meta.pages)
                 writeFloat(ASPECT); writeLong(meta.created)
@@ -95,40 +141,94 @@ object SketchFile {
                 writeLong(0L); flush()
             }
             zip.closeEntry()
+
+            if (items.isNotEmpty()) {
+                zip.putNextEntry(ZipEntry(ITEMS))
+                DataOutputStream(zip).run {
+                    for (it in items) {
+                        if (it.id == 0L) continue
+                        writeLong(it.id); writeInt(it.page); writeInt(it.kind); writeUTF(it.asset); writeInt(it.sourcePage)
+                        writeFloat(it.x); writeFloat(it.y); writeFloat(it.w); writeFloat(it.h)
+                        writeLong(it.created); writeLong(it.time); writeLong(it.deleted)
+                    }
+                    writeLong(0L); flush()
+                }
+                zip.closeEntry()
+            }
+
+            // Pictures and PDFs are already compressed: store them as they are.
+            // Stored entries need their size and checksum first: read each file once for those,
+            // then again to copy it, so a large PDF is never held in memory.
+            val buf = ByteArray(1 shl 16)
+            for ((name, open) in assets) {
+                if (!isAssetName(name)) continue
+                val crc = CRC32()
+                var size = 0L
+                open().use { input -> while (true) { val n = input.read(buf); if (n < 0) break; crc.update(buf, 0, n); size += n } }
+                zip.putNextEntry(ZipEntry(ASSET_PREFIX + name).apply {
+                    method = ZipEntry.STORED; this.size = size; compressedSize = size; this.crc = crc.value
+                })
+                open().use { input -> while (true) { val n = input.read(buf); if (n < 0) break; zip.write(buf, 0, n) } }
+                zip.closeEntry()
+            }
         }
     }
 
     /**
      * Reads a sketchbook, handing over its parts as they are read: the settings first, then
-     * deleted stroke ids, then strokes. Throws [IOException] if this isn't a sketchbook file.
+     * deleted stroke ids, strokes, placed items and stored files. [onAsset] must read the stream it
+     * is given (or not) before returning. Throws [IOException] if this isn't a sketchbook file.
      */
-    fun read(input: InputStream, onMeta: (SketchMeta) -> Unit, onDeleted: (Long, Long) -> Unit, onStroke: (SketchStrokeRecord) -> Unit) {
+    fun read(
+        input: InputStream,
+        onMeta: (SketchMeta) -> Unit,
+        onDeleted: (Long, Long) -> Unit,
+        onStroke: (SketchStrokeRecord) -> Unit,
+        onItem: (SketchItem) -> Unit = {},
+        onAsset: (String, InputStream) -> Unit = { _, _ -> },
+    ) {
         val keepOpen = object : FilterInputStream(input) { override fun close() {} }
         ZipInputStream(BufferedInputStream(keepOpen, 1 shl 16)).use { zip ->
             var meta: SketchMeta? = null
             while (true) {
                 val entry = zip.nextEntry ?: break
                 val data = DataInputStream(zip)
-                when (entry.name) {
-                    META -> meta = readMeta(data).also(onMeta)
-                    DELETED -> {
-                        if (meta == null) throw IOException("Not a sketchbook")
-                        while (true) {
-                            val id = data.readLong(); if (id == 0L) break
-                            onDeleted(id, data.readLong())
-                        }
+                val name = entry.name
+                if (name != META && meta == null) throw IOException("Not a sketchbook")
+                when {
+                    name == META -> meta = readMeta(data).also(onMeta)
+                    name == DELETED -> while (true) {
+                        val id = data.readLong(); if (id == 0L) break
+                        onDeleted(id, data.readLong())
                     }
-                    STROKES -> {
-                        val m = meta ?: throw IOException("Not a sketchbook")
+                    name == STROKES -> {
+                        val pages = maxOf(meta!!.pages, 1)
                         while (true) {
                             val id = data.readLong(); if (id == 0L) break
                             val page = data.readInt(); val tool = data.readInt(); val color = data.readInt()
                             val width = data.readFloat(); val created = data.readLong(); val n = data.readInt()
-                            if (n < 1 || n > MAX_POINTS || page !in 0 until maxOf(m.pages, 1) || !width.isFinite() || width <= 0f) throw IOException("Damaged sketchbook")
+                            if (n < 1 || n > MAX_POINTS || page !in 0 until pages || !width.isFinite() || width <= 0f) throw IOException("Damaged sketchbook")
                             val pts = FloatArray(n * 3) { data.readFloat() }
                             if (pts.any { !it.isFinite() }) throw IOException("Damaged sketchbook")
                             onStroke(SketchStrokeRecord(id, page, tool, color, width, created, pts))
                         }
+                    }
+                    name == ITEMS -> {
+                        val pages = maxOf(meta!!.pages, 1)
+                        while (true) {
+                            val id = data.readLong(); if (id == 0L) break
+                            val item = SketchItem(id, data.readInt(), data.readInt(), data.readUTF(), data.readInt(),
+                                data.readFloat(), data.readFloat(), data.readFloat(), data.readFloat(),
+                                data.readLong(), data.readLong(), data.readLong())
+                            val sizes = listOf(item.x, item.y, item.w, item.h)
+                            if (item.page !in 0 until pages || !isAssetName(item.asset) || item.sourcePage < 0 ||
+                                sizes.any { !it.isFinite() } || item.w <= 0f || item.h <= 0f) throw IOException("Damaged sketchbook")
+                            onItem(item)
+                        }
+                    }
+                    name.startsWith(ASSET_PREFIX) -> {
+                        val asset = name.removePrefix(ASSET_PREFIX)
+                        if (isAssetName(asset)) onAsset(asset, keepOpenStream(zip))
                     }
                 }
                 zip.closeEntry()
@@ -136,6 +236,8 @@ object SketchFile {
             if (meta == null) throw IOException("Not a sketchbook")
         }
     }
+
+    private fun keepOpenStream(input: InputStream): InputStream = object : FilterInputStream(input) { override fun close() {} }
 
     /** Just the settings (title, id), for deciding what to do with a file before importing it. */
     fun readMeta(input: InputStream): SketchMeta {
@@ -162,7 +264,7 @@ object SketchFile {
             if (version > VERSION) throw IOException("This sketchbook was made by a newer version of E-Reader. Update the app to open it.")
             val id = d.readUTF(); val title = d.readUTF(); val titleTime = d.readLong()
             val paper = d.readInt(); val paperTime = d.readLong(); val pages = d.readInt()
-            d.readFloat() // page shape; always ASPECT in version 1
+            d.readFloat() // page shape; always ASPECT so far
             val created = d.readLong()
             val meta = SketchMeta(id, title, titleTime, paper, paperTime, pages, created)
             if (meta.id.isBlank() || meta.pages !in 1..MAX_PAGES) throw IOException("Damaged sketchbook")
@@ -173,7 +275,7 @@ object SketchFile {
     }
 }
 
-/** How two copies of a sketchbook's settings combine. */
+/** How two copies of a sketchbook combine. */
 object SketchMerge {
     /** The newer title and paper win (ties keep [local]); the page count only grows. */
     fun meta(local: SketchMeta, remote: SketchMeta): SketchMeta = local.copy(
@@ -184,4 +286,16 @@ object SketchMerge {
         pages = maxOf(local.pages, remote.pages).coerceAtMost(SketchFile.MAX_PAGES),
         created = minOf(local.created, remote.created),
     )
+
+    /**
+     * One placed item seen on both sides. A removal is final (whichever side removed it);
+     * otherwise the more recent position wins (ties keep [local]).
+     */
+    fun item(local: SketchItem, remote: SketchItem): SketchItem = when {
+        local.deleted > 0 && remote.deleted > 0 -> if (remote.deleted < local.deleted) local.copy(deleted = remote.deleted) else local
+        local.deleted > 0 -> local
+        remote.deleted > 0 -> local.copy(deleted = remote.deleted, time = maxOf(local.time, remote.time))
+        remote.time > local.time -> remote
+        else -> local
+    }
 }

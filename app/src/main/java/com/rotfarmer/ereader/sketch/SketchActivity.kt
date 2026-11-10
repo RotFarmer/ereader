@@ -83,10 +83,18 @@ class SketchActivity : Activity(), SketchView.Listener, PenToolbar.Callbacks {
     private lateinit var penBtn: IconButton
     private var toolbar: PenToolbar? = null
     private lateinit var popups: Overlay
+    /** Floating bar for the selected picture, or for an import in progress. */
+    private lateinit var bar: LinearLayout
+    private var importing: Pair<String, () -> Unit>? = null
     private var syncing = false
 
     /** Undo and redo, per page, for this visit. */
-    private class Op(val added: List<InkStroke>, val removed: List<InkStroke>)
+    private class Op(
+        val added: List<InkStroke>, val removed: List<InkStroke>,
+        val itemsAdded: List<SketchItem> = emptyList(), val itemsRemoved: List<SketchItem> = emptyList(),
+        /** A picture moved or resized: (before, after). */
+        val moved: Pair<SketchItem, SketchItem>? = null,
+    )
     private val undo = HashMap<Int, ArrayDeque<Op>>()
     private val redo = HashMap<Int, ArrayDeque<Op>>()
     /** Erased stroke id → the copy an undo brought back in its place. */
@@ -201,6 +209,7 @@ class SketchActivity : Activity(), SketchView.Listener, PenToolbar.Callbacks {
             setOnClickListener { settings.sketchToolbarVisible = !settings.sketchToolbarVisible; buildToolbar() }
         }
         topBar.addView(penBtn)
+        topBar.addView(IconButton(this, ICON_IMPORT, ui).apply { contentDescription = "Import a picture or document"; setOnClickListener { pickImport() } })
         topBar.addView(IconButton(this, Icons.SHARE, ui).apply { contentDescription = "Share and sync"; setOnClickListener { showShare(this) } })
         topBar.addView(IconButton(this, Icons.MORE, ui).apply { contentDescription = "More"; setOnClickListener { showMore(this) } })
 
@@ -224,6 +233,13 @@ class SketchActivity : Activity(), SketchView.Listener, PenToolbar.Callbacks {
             }
         }
         root.addView(header, FrameLayout.LayoutParams(-1, -2, Gravity.TOP))
+        bar = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL
+            background = panelBg(this@SketchActivity, ui, 10f); elevation = dp(3).toFloat()
+            setPadding(dp(14), dp(4), dp(4), dp(4)); visibility = View.GONE
+            isClickable = true
+        }
+        root.addView(bar, FrameLayout.LayoutParams(-2, -2, Gravity.TOP or Gravity.CENTER_HORIZONTAL).apply { topMargin = dp(68) })
         view.insetTop = dp(57)
         setContentView(root)
         popups = Overlay(root)
@@ -270,10 +286,12 @@ class SketchActivity : Activity(), SketchView.Listener, PenToolbar.Callbacks {
 
     private fun showPage(index: Int) {
         scope.launch {
-            val list = withContext(SketchStore.io) { store.strokes(bookId, index) }
+            val (list, items) = withContext(SketchStore.io) { store.strokes(bookId, index) to store.items(bookId, index) }
             view.setPage(index, list)
+            view.setItems(items)
+            loadPictures(items)
             save { store.setCurrentPage(bookId, index) }
-            updateTitle(); updateUndo()
+            updateTitle(); updateUndo(); refreshBar()
         }
     }
 
@@ -325,13 +343,27 @@ class SketchActivity : Activity(), SketchView.Listener, PenToolbar.Callbacks {
             InkStroke(SketchStore.newStrokeId(), 0L, Anchor(Anchor.PDF, page.toLong(), 0), it.tool, it.color, it.width, it.pts, it.created)
                 .also { copy -> restoredAs[current(it.id)] = copy.id }
         }
-        view.setStrokes(view.pageStrokes.filter { it.id !in gone } + again)
+        if (gone.isNotEmpty() || again.isNotEmpty()) view.setStrokes(view.pageStrokes.filter { it.id !in gone } + again)
+        // Pictures: the same, plus moving one back to where it was.
+        val now = System.currentTimeMillis()
+        val itemsGone = op.itemsAdded.map { current(it.id) }.toSet()
+        val itemsAgain = op.itemsRemoved.map { it.copy(id = SketchStore.newStrokeId(), time = now, deleted = 0L).also { copy -> restoredAs[current(it.id)] = copy.id } }
+        val moved = op.moved?.let { (before, after) -> val id = current(after.id); after.copy(id = id) to before.copy(id = id) }
+        if (itemsGone.isNotEmpty() || itemsAgain.isNotEmpty() || moved != null) {
+            val list = view.pageItems.filter { it.id !in itemsGone }.map { if (moved != null && it.id == moved.second.id) moved.second else it } + itemsAgain
+            view.setItems(list.sortedWith(compareByDescending<SketchItem> { it.kind }.thenBy { it.created }))
+            loadPictures(itemsAgain + listOfNotNull(moved?.second))
+            refreshBar()
+        }
         save {
             store.eraseStrokes(bookId, gone)
             store.addStrokes(bookId, page, again)
+            store.removeItems(bookId, itemsGone)
+            store.addItems(bookId, itemsAgain)
+            moved?.let { store.moveItem(bookId, it.second) }
         }
         syncLater()
-        return Op(again, op.added)
+        return Op(again, op.added, itemsAgain, op.itemsAdded, moved)
     }
 
     override fun onUndo() {
@@ -348,12 +380,220 @@ class SketchActivity : Activity(), SketchView.Listener, PenToolbar.Callbacks {
         updateUndo()
     }
 
+    // ------------------------------------------------------------------ pictures and documents
+
+    private val pictureCache = object : android.util.LruCache<String, android.graphics.Bitmap>((Runtime.getRuntime().maxMemory() / 5).toInt()) {
+        override fun sizeOf(key: String, value: android.graphics.Bitmap) = value.byteCount
+    }
+    private val pictureJobs = HashSet<String>()
+
+    /** Size a placed item should be loaded at: half again its size on screen, for zooming in. */
+    private fun pictureKey(it: SketchItem): Pair<String, Int> {
+        val px = (((it.w * view.pageWidthPx * 1.5f).toInt() + 127) / 128 * 128).coerceIn(128, 2000)
+        return "${it.asset}:${it.sourcePage}:$px" to px
+    }
+
+    private fun loadPictures(items: List<SketchItem>) {
+        for (item in items) {
+            val (key, px) = pictureKey(item)
+            val cached = pictureCache.get(key)
+            if (cached != null) { view.setItemBitmap(item.id, cached); continue }
+            if (!pictureJobs.add(key)) continue
+            scope.launch {
+                val bmp = try { withContext(Dispatchers.IO) { SketchAssets.render(store, item, px) } } finally { pictureJobs.remove(key) }
+                if (bmp != null) {
+                    pictureCache.put(key, bmp)
+                    view.pageItems.filter { pictureKey(it).first == key }.forEach { view.setItemBitmap(it.id, bmp) }
+                }
+            }
+        }
+    }
+
+    override fun onItemSelected(item: SketchItem?) = refreshBar()
+
+    override fun onItemChanged(before: SketchItem, after: SketchItem) {
+        val page = view.page
+        record(page, Op(emptyList(), emptyList(), moved = before to after))
+        save { store.moveItem(bookId, after) }
+        if (after.w > before.w * 1.3f) loadPictures(listOf(after))
+        syncLater()
+    }
+
+    /** The floating bar: an import in progress, or what can be done with the selected picture. */
+    private fun refreshBar() {
+        bar.removeAllViews()
+        fun text(t: String) = bar.addView(label(this, t, ui, 13.5f).apply { setPadding(0, 0, dp(10), 0); maxLines = 1 })
+        fun action(t: String, filled: Boolean = false, f: () -> Unit) = bar.addView(TextButton(this, t, ui, filled).apply { minHeight = dp(36); setOnClickListener { f() } },
+            LinearLayout.LayoutParams(-2, -2).apply { marginEnd = dp(4) })
+        val imp = importing
+        val sel = view.selected
+        when {
+            imp != null -> { text(imp.first); action("Cancel") { imp.second() } }
+            sel != null && sel.kind == SketchItem.DOCUMENT -> {
+                text("Document page · drag to move")
+                action("Remove") { removeItem(sel) }
+                action("Remove whole document") { removeDocument(sel) }
+                action("Done", filled = true) { view.select(null); refreshBar() }
+            }
+            sel != null -> {
+                text("Drag to move · drag the corner to resize")
+                action("Remove") { removeItem(sel) }
+                action("Done", filled = true) { view.select(null); refreshBar() }
+            }
+            else -> { bar.visibility = View.GONE; return }
+        }
+        bar.visibility = View.VISIBLE
+    }
+
+    private fun removeItem(item: SketchItem) {
+        val page = view.page
+        view.select(null)
+        view.setItems(view.pageItems.filter { it.id != item.id })
+        record(page, Op(emptyList(), emptyList(), itemsRemoved = listOf(item)))
+        save { store.removeItems(bookId, listOf(item.id)) }
+        syncLater(); refreshBar()
+    }
+
+    private fun removeDocument(item: SketchItem) {
+        dialog(this, settings.dark).setMessage("Remove every page of this document from the sketchbook? Your drawing stays.")
+            .setNegativeButton("Cancel", null)
+            .setPositiveButton("Remove") { _, _ ->
+                view.select(null)
+                scope.launch {
+                    val n = withContext(SketchStore.io) {
+                        val all = store.itemsWithAsset(bookId, item.asset)
+                        store.removeItems(bookId, all.map { it.id }); all.size
+                    }
+                    view.setItems(view.pageItems.filter { it.asset != item.asset })
+                    refreshBar(); syncLater()
+                    toast("Removed $n ${if (n == 1) "page" else "pages"}")
+                }
+            }.show()
+    }
+
+    private fun pickImport() {
+        pick(Intent(Intent.ACTION_OPEN_DOCUMENT).addCategory(Intent.CATEGORY_OPENABLE).setType("*/*").putExtra(Intent.EXTRA_MIME_TYPES, arrayOf(
+            "image/*", "application/pdf", "application/epub+zip", "application/x-mobipocket-ebook",
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.document", "text/plain", "text/html", "application/octet-stream",
+        )), REQ_IMPORT)
+    }
+
+    private fun importFile(uri: android.net.Uri) {
+        val cancelled = java.util.concurrent.atomic.AtomicBoolean(false)
+        val stop = { cancelled.set(true); importing = null; refreshBar() }
+        importing = "Importing…" to stop; refreshBar()
+        scope.launch {
+            val prepared = try {
+                withContext(Dispatchers.IO) {
+                    SketchAssets.prepare(app, uri, { cancelled.get() }) { msg -> main.post { if (importing != null && !cancelled.get()) { importing = msg to stop; refreshBar() } } }
+                }
+            } catch (e: CancellationException) {
+                if (!cancelled.get()) throw e
+                null
+            } catch (e: Exception) {
+                if (!cancelled.get()) toast(e.message ?: "Couldn't import that file")
+                null
+            }
+            importing = null; refreshBar()
+            if (cancelled.get()) return@launch
+            when (prepared) {
+                is SketchAssets.Prepared.Picture -> placePicture(prepared)
+                is SketchAssets.Prepared.Document -> chooseDocumentPages(prepared)
+                null -> {}
+            }
+        }
+    }
+
+    private fun placePicture(p: SketchAssets.Prepared.Picture) {
+        val page = view.page
+        val r = SketchAssets.fitPicture(p.width, p.height)
+        val now = System.currentTimeMillis()
+        val item = SketchItem(SketchStore.newStrokeId(), page, SketchItem.PICTURE, p.asset, 0, r.left, r.top, r.width(), r.height(), now, now)
+        view.setItems(view.pageItems + item)
+        loadPictures(listOf(item))
+        record(page, Op(emptyList(), emptyList(), itemsAdded = listOf(item)))
+        save { store.addItems(bookId, listOf(item)) }
+        syncLater()
+        view.select(item); refreshBar()
+    }
+
+    private fun chooseDocumentPages(d: SketchAssets.Prepared.Document) {
+        popups.dismissAll()
+        val n = d.pageSizes.size
+        val c = card(this, ui)
+        c.addView(label(this, d.title, ui, 19f, bold = true, serif = true).apply { maxLines = 2; ellipsize = TextUtils.TruncateAt.END })
+        c.addView(label(this, "$n ${if (n == 1) "page" else "pages"}. Each one becomes a sketchbook page you can draw on.", ui, 13.5f, ui.muted))
+        val input = EditText(this).apply {
+            setSingleLine(); textSize = 16f; setText(if (n == 1) "1" else "1-${minOf(n, 100)}"); hint = "e.g. 1-5, 8"
+            setTextColor(ui.fg); setHintTextColor(ui.muted)
+            background = panelBg(this@SketchActivity, ui, 8f, 1f, ui.soft); setPadding(dp(12), dp(8), dp(12), dp(8))
+        }
+        if (n > 1) {
+            c.addView(sectionTitle(this, "Pages to import", ui))
+            c.addView(input)
+        }
+        c.addView(label(this, "They go on empty pages, starting here if there's room, so nothing you've drawn moves.", ui, 12.5f, ui.muted).apply { setPadding(0, dp(8), 0, 0) })
+        val row = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.END; setPadding(0, dp(12), 0, 0) }
+        row.addView(TextButton(this, "Cancel", ui).apply { setOnClickListener { popups.dismissAll() } }, LinearLayout.LayoutParams(-2, -2).apply { marginEnd = dp(8) })
+        row.addView(TextButton(this, "Import", ui, filled = true).apply {
+            setOnClickListener {
+                val pages = try { parsePages(input.text.toString(), n) } catch (e: IllegalArgumentException) { toast(e.message ?: "Check the page numbers"); return@setOnClickListener }
+                popups.dismissAll()
+                placeDocument(d, pages)
+            }
+        })
+        c.addView(row)
+        popups.show(c, null, maxWidthDp = 440)
+    }
+
+    /** "1-5, 8" → zero-based page numbers, in order. "all" means every page. */
+    private fun parsePages(text: String, count: Int): List<Int> {
+        if (text.trim().equals("all", ignoreCase = true)) return (0 until count).toList()
+        val out = sortedSetOf<Int>()
+        for (part in text.split(',')) {
+            val t = part.trim()
+            if (t.isEmpty()) continue
+            val ends = t.split('-', limit = 2).map { it.trim().toIntOrNull() ?: throw IllegalArgumentException("Use page numbers like 1-5, 8") }
+            val a = ends[0]; val b = ends.getOrElse(1) { a }
+            if (a < 1 || b > count || a > b) throw IllegalArgumentException("Choose pages from 1 to $count")
+            for (i in a..b) out += i - 1
+        }
+        if (out.isEmpty()) throw IllegalArgumentException("Enter the pages to import")
+        return out.toList()
+    }
+
+    private fun placeDocument(d: SketchAssets.Prepared.Document, pages: List<Int>) {
+        val here = view.page
+        scope.launch {
+            val start = withContext(SketchStore.io) {
+                val b = store.get(bookId) ?: return@withContext null
+                val k = pages.size
+                var s = here
+                if (s + k > b.pages || !store.pagesFree(bookId, s, k)) s = maxOf(here, (store.usedPages(bookId).maxOrNull() ?: -1) + 1)
+                if (s + k > SketchFile.MAX_PAGES) return@withContext -1
+                if (s + k > b.pages) store.addPages(bookId, s + k - b.pages)
+                val now = System.currentTimeMillis()
+                store.addItems(bookId, pages.mapIndexed { j, src ->
+                    val r = SketchAssets.fitPage(d.pageSizes[src])
+                    SketchItem(SketchStore.newStrokeId(), s + j, SketchItem.DOCUMENT, d.asset, src, r.left, r.top, r.width(), r.height(), now + j, now)
+                })
+                s
+            } ?: return@launch
+            if (start < 0) { toast("Not enough room: a sketchbook holds up to ${SketchFile.MAX_PAGES} pages"); return@launch }
+            book = withContext(SketchStore.io) { store.get(bookId) }
+            showPage(start)
+            syncLater()
+            val k = pages.size
+            toast(if (k == 1) "Placed on page ${start + 1}" else "Placed on pages ${start + 1}–${start + k}")
+        }
+    }
+
     private fun clearPage() {
         val all = view.pageStrokes.toList()
         if (all.isEmpty()) return
         view.setStrokes(emptyList())
         onStrokesErased(all)
-        toast("Page cleared. Undo brings it back.")
+        toast("Ink erased. Undo brings it back.")
     }
 
     override fun onToolChanged() { view.invalidate() }
@@ -416,10 +656,12 @@ class SketchActivity : Activity(), SketchView.Listener, PenToolbar.Callbacks {
             val page = view.page
             val since = System.currentTimeMillis()
             val list = withContext(SketchStore.io) { store.strokes(bookId, page) }
+            val items = withContext(SketchStore.io) { store.items(bookId, page) }
             if (view.page == page) {
                 // Keep strokes drawn while the page was loading; they are saved right after.
                 val ids = list.mapTo(HashSet()) { it.id }
                 view.setStrokes(list + view.pageStrokes.filter { it.created >= since && it.id !in ids })
+                if (view.selected == null) { view.setItems(items); loadPictures(items) }
             }
         }
         updateTitle()
@@ -506,7 +748,7 @@ class SketchActivity : Activity(), SketchView.Listener, PenToolbar.Callbacks {
                 }
             }
         }, LinearLayout.LayoutParams(0, -2, 1f).apply { marginEnd = dp(6) })
-        pagesRow.addView(TextButton(this, "Clear this page", ui).apply { setOnClickListener { popups.dismissAll(); clearPage() } }, LinearLayout.LayoutParams(0, -2, 1f))
+        pagesRow.addView(TextButton(this, "Erase all ink", ui).apply { setOnClickListener { popups.dismissAll(); clearPage() } }, LinearLayout.LayoutParams(0, -2, 1f))
         c.addView(pagesRow)
         c.addView(sectionTitle(this, "Pen & touch", ui))
         c.addView(toggleRow(this, "Draw with finger", "Two fingers zoom and move the page", settings.fingerDraw, ui) { settings.fingerDraw = it })
@@ -637,6 +879,7 @@ class SketchActivity : Activity(), SketchView.Listener, PenToolbar.Callbacks {
                 afterChanges(emptySet(), false)
                 if (book?.syncError == null) toast("Saved. Open the same file on your other device to share this sketchbook.")
             }
+            REQ_IMPORT -> importFile(uri)
             REQ_PDF -> scope.launch {
                 try {
                     withContext(SketchStore.io) {
@@ -654,6 +897,8 @@ class SketchActivity : Activity(), SketchView.Listener, PenToolbar.Callbacks {
         private const val EXTRA_ID = "sketchbook"
         private const val REQ_LINK = 61
         private const val REQ_PDF = 62
+        private const val REQ_IMPORT = 63
+        private const val ICON_IMPORT = "\ue43e" // add_photo_alternate
         private const val POLL_MS = 20_000L
 
         fun intent(context: Context, id: String) = Intent(context, SketchActivity::class.java).putExtra(EXTRA_ID, id)

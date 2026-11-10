@@ -72,6 +72,10 @@ Library → **Sketchbooks** → **+** → **New sketchbook**. A sketchbook has 3
 
 - **Draw** with the S Pen using the same pens as the reader; hold the S Pen button (or pick the eraser) to erase. Undo and redo are on the pen toolbar.
 - **Pages:** swipe with a finger, use the arrows, or tap the page number to jump to a page or to any page you've drawn on. Pinch to zoom.
+- **Import** (picture button in the top bar):
+  - **Pictures** (JPG, PNG, WebP, HEIC) land on the current page, ready to move and resize. Long-press a picture with a finger to select it again: drag to move, drag the corner to resize, or remove it.
+  - **Documents** (PDF, EPUB, MOBI, Word, text): choose which pages. Each becomes a sketchbook page you can write on, placed on empty pages from where you are, so nothing you've drawn moves. Books and Word files are laid out into pages first.
+  - Imported files travel with the sketchbook when it syncs or is sent as a copy.
 - Everything is saved as you draw.
 
 ### Sharing between devices

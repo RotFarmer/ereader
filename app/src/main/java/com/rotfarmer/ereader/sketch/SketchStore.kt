@@ -8,6 +8,7 @@ import com.rotfarmer.ereader.ink.Anchor
 import com.rotfarmer.ereader.ink.InkStroke
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.asCoroutineDispatcher
+import java.io.File
 import java.io.IOException
 import java.io.InputStream
 import java.io.OutputStream
@@ -41,7 +42,10 @@ class MergeResult(val bookId: String, val created: Boolean, val changedPages: Se
  * Sketchbooks on this device. Strokes are never edited: erasing marks a stroke deleted (keeping
  * its id), which is what lets two devices merge their copies safely.
  */
-class SketchStore private constructor(context: Context) : SQLiteOpenHelper(context, "sketches.db", null, 1) {
+class SketchStore private constructor(context: Context) : SQLiteOpenHelper(context, "sketches.db", null, 2) {
+    /** Imported pictures and documents, one file each, named by their SHA-256 (so never stored twice). */
+    val assetsDir = File(context.filesDir, "sketch-assets").apply { mkdirs() }
+    fun assetFile(name: String) = File(assetsDir, name)
 
     companion object {
         /** Paper styles. */
@@ -91,9 +95,23 @@ class SketchStore private constructor(context: Context) : SQLiteOpenHelper(conte
                 created INTEGER NOT NULL, points BLOB NOT NULL, deleted INTEGER NOT NULL DEFAULT 0)"""
         )
         db.execSQL("CREATE INDEX strokes_page ON strokes(book, page, deleted)")
+        createItems(db)
     }
 
-    override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) {}
+    override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) {
+        if (oldVersion < 2) createItems(db)
+    }
+
+    private fun createItems(db: SQLiteDatabase) {
+        db.execSQL(
+            """CREATE TABLE items(
+                id INTEGER PRIMARY KEY, book TEXT NOT NULL, page INTEGER NOT NULL, kind INTEGER NOT NULL,
+                asset TEXT NOT NULL, source_page INTEGER NOT NULL, x REAL NOT NULL, y REAL NOT NULL,
+                w REAL NOT NULL, h REAL NOT NULL, created INTEGER NOT NULL, time INTEGER NOT NULL,
+                deleted INTEGER NOT NULL DEFAULT 0)"""
+        )
+        db.execSQL("CREATE INDEX items_page ON items(book, page, deleted)")
+    }
 
     private inline fun <T> tx(block: (SQLiteDatabase) -> T): T {
         val db = writableDatabase
@@ -104,7 +122,7 @@ class SketchStore private constructor(context: Context) : SQLiteOpenHelper(conte
     // ------------------------------------------------------------------ books
 
     private val listSql = """SELECT b.id, b.title, b.pages, b.paper, b.current_page, b.updated,
-        (SELECT COUNT(DISTINCT s.page) FROM strokes s WHERE s.book = b.id AND s.deleted = 0),
+        (SELECT COUNT(*) FROM (SELECT page FROM strokes WHERE book = b.id AND deleted = 0 UNION SELECT page FROM items WHERE book = b.id AND deleted = 0)),
         b.sync_uri, b.sync_name, b.synced_at, b.sync_error FROM books b"""
 
     private fun books(where: String, args: Array<String>?): List<Sketchbook> =
@@ -148,9 +166,15 @@ class SketchStore private constructor(context: Context) : SQLiteOpenHelper(conte
     }
 
     /** Removes the sketchbook from this device only. A shared file elsewhere is left alone. */
-    fun delete(id: String) = tx { db ->
-        db.delete("strokes", "book = ?", arrayOf(id))
-        db.delete("books", "id = ?", arrayOf(id))
+    fun delete(id: String) {
+        tx { db ->
+            db.delete("strokes", "book = ?", arrayOf(id))
+            db.delete("items", "book = ?", arrayOf(id))
+            db.delete("books", "id = ?", arrayOf(id))
+        }
+        // Files no other sketchbook uses.
+        val used = readableDatabase.rawQuery("SELECT DISTINCT asset FROM items", null).use { c -> buildSet { while (c.moveToNext()) add(c.getString(0)) } }
+        assetsDir.listFiles()?.filter { it.isFile && it.name !in used && SketchFile.isAssetName(it.name) }?.forEach { it.delete() }
     }
 
     fun meta(id: String): SketchMeta? = readableDatabase.rawQuery(
@@ -189,15 +213,85 @@ class SketchStore private constructor(context: Context) : SQLiteOpenHelper(conte
         }
     }
 
-    /** Pages that have drawing on them, in order. */
+    /** Pages with drawing, pictures or documents on them, in order. */
     fun usedPages(id: String): List<Int> = readableDatabase.rawQuery(
-        "SELECT DISTINCT page FROM strokes WHERE book = ? AND deleted = 0 ORDER BY page", arrayOf(id)
+        "SELECT page FROM strokes WHERE book = ? AND deleted = 0 UNION SELECT page FROM items WHERE book = ? AND deleted = 0 ORDER BY page", arrayOf(id, id)
     ).use { c -> buildList { while (c.moveToNext()) add(c.getInt(0)) } }
 
-    /** The page drawn on most recently, for the library picture. */
+    /** The page changed most recently, for the library picture. */
     fun latestPage(id: String): Int? = readableDatabase.rawQuery(
-        "SELECT page FROM strokes WHERE book = ? AND deleted = 0 ORDER BY created DESC LIMIT 1", arrayOf(id)
+        "SELECT page, created AS t FROM strokes WHERE book = ? AND deleted = 0 UNION ALL SELECT page, time AS t FROM items WHERE book = ? AND deleted = 0 ORDER BY t DESC LIMIT 1", arrayOf(id, id)
     ).use { c -> if (c.moveToFirst()) c.getInt(0) else null }
+
+    // ------------------------------------------------------------------ pictures and documents
+
+    private fun item(c: android.database.Cursor, book: String) = SketchItem(c.getLong(0), c.getInt(1), c.getInt(2), c.getString(3), c.getInt(4),
+        c.getFloat(5), c.getFloat(6), c.getFloat(7), c.getFloat(8), c.getLong(9), c.getLong(10), c.getLong(11))
+
+    private val itemCols = "id, page, kind, asset, source_page, x, y, w, h, created, time, deleted"
+
+    /** What's placed on a page, bottom first: document pages, then pictures in the order added. */
+    fun items(id: String, page: Int): List<SketchItem> = readableDatabase.rawQuery(
+        "SELECT $itemCols FROM items WHERE book = ? AND page = ? AND deleted = 0 ORDER BY kind DESC, created, id", arrayOf(id, "$page")
+    ).use { c -> buildList { while (c.moveToNext()) add(item(c, id)) } }
+
+    private fun putItem(db: SQLiteDatabase, book: String, it: SketchItem, conflict: Int) = db.insertWithOnConflict("items", null, ContentValues().apply {
+        put("id", it.id); put("book", book); put("page", it.page); put("kind", it.kind); put("asset", it.asset); put("source_page", it.sourcePage)
+        put("x", it.x); put("y", it.y); put("w", it.w); put("h", it.h); put("created", it.created); put("time", it.time); put("deleted", it.deleted)
+    }, conflict)
+
+    fun addItems(id: String, list: List<SketchItem>) {
+        if (list.isEmpty()) return
+        tx { db ->
+            for (it in list) putItem(db, id, it, SQLiteDatabase.CONFLICT_IGNORE)
+            change(id, ContentValues())
+        }
+    }
+
+    /** A picture was moved or resized. */
+    fun moveItem(id: String, item: SketchItem) {
+        tx { db ->
+            db.execSQL("UPDATE items SET x = ?, y = ?, w = ?, h = ?, time = ? WHERE id = ? AND book = ? AND deleted = 0",
+                arrayOf<Any>(item.x, item.y, item.w, item.h, System.currentTimeMillis(), item.id, id))
+            change(id, ContentValues())
+        }
+    }
+
+    /** Removed items keep their row so other devices learn they were removed. */
+    fun removeItems(id: String, ids: Collection<Long>) {
+        if (ids.isEmpty()) return
+        val now = System.currentTimeMillis()
+        tx { db ->
+            for (i in ids) db.execSQL("UPDATE items SET deleted = ?, time = ? WHERE id = ? AND book = ? AND deleted = 0", arrayOf<Any>(now, now, i, id))
+            change(id, ContentValues())
+        }
+    }
+
+    /** Every page placement of one imported document (to remove it everywhere at once). */
+    fun itemsWithAsset(id: String, asset: String): List<SketchItem> = readableDatabase.rawQuery(
+        "SELECT $itemCols FROM items WHERE book = ? AND asset = ? AND deleted = 0", arrayOf(id, asset)
+    ).use { c -> buildList { while (c.moveToNext()) add(item(c, id)) } }
+
+    /** True if pages [start] to [start] + [count] - 1 have nothing on them. */
+    fun pagesFree(id: String, start: Int, count: Int): Boolean = readableDatabase.rawQuery(
+        "SELECT 1 FROM strokes WHERE book = ? AND deleted = 0 AND page BETWEEN ? AND ? UNION ALL SELECT 1 FROM items WHERE book = ? AND deleted = 0 AND page BETWEEN ? AND ? LIMIT 1",
+        arrayOf(id, "$start", "${start + count - 1}", id, "$start", "${start + count - 1}")
+    ).use { !it.moveToFirst() }
+
+    /** Stores a received file if it's new here, checking it is the file its name says. */
+    private fun receiveAsset(name: String, input: InputStream) {
+        val dest = assetFile(name)
+        if (dest.isFile) return
+        val tmp = File(assetsDir, "$name.part")
+        val digest = java.security.MessageDigest.getInstance("SHA-256")
+        tmp.outputStream().use { out ->
+            val buf = ByteArray(1 shl 16)
+            while (true) { val n = input.read(buf); if (n < 0) break; digest.update(buf, 0, n); out.write(buf, 0, n) }
+        }
+        val hex = digest.digest().joinToString("") { "%02x".format(it) }
+        if (hex == name.substringBefore('.') && tmp.renameTo(dest)) return
+        tmp.delete()
+    }
 
     // ------------------------------------------------------------------ sync bookkeeping
 
@@ -234,7 +328,10 @@ class SketchStore private constructor(context: Context) : SQLiteOpenHelper(conte
     /** Writes the whole sketchbook in the shared `.sketchbook` format. */
     fun write(id: String, out: OutputStream) {
         val meta = meta(id) ?: throw IOException("Sketchbook missing")
-        SketchFile.write(out, meta, deleted = { emit ->
+        val items = readableDatabase.rawQuery("SELECT $itemCols FROM items WHERE book = ?", arrayOf(id)).use { c -> buildList { while (c.moveToNext()) add(item(c, id)) } }
+        val assets = items.filter { it.deleted == 0L }.map { it.asset }.distinct().map { assetFile(it) }.filter { it.isFile }
+            .map { f -> f.name to { f.inputStream() as InputStream } }
+        SketchFile.write(out, meta, items = items, assets = assets, deleted = { emit ->
             readableDatabase.rawQuery("SELECT id, deleted FROM strokes WHERE book = ? AND deleted > 0", arrayOf(id)).use { c ->
                 while (c.moveToNext()) emit(c.getLong(0), c.getLong(1))
             }
@@ -257,6 +354,8 @@ class SketchStore private constructor(context: Context) : SQLiteOpenHelper(conte
         var remoteStrokes = 0
         var remoteDeleted = 0
         var remoteMeta: SketchMeta? = null
+        var remoteItems = 0
+        var itemsBehind = false
         SketchFile.read(input, onMeta = { remote ->
             if (expectedId != null && remote.id != expectedId) throw IOException("This file holds a different sketchbook (“${remote.title}”).")
             bookId = remote.id
@@ -301,7 +400,21 @@ class SketchStore private constructor(context: Context) : SQLiteOpenHelper(conte
                 put("width", s.width); put("created", s.created); put("points", pointsToBlob(s.pts))
             }, SQLiteDatabase.CONFLICT_IGNORE)
             if (row != -1L) changed += s.page
-        })
+        }, onItem = { remote ->
+            remoteItems++
+            val local = db.rawQuery("SELECT $itemCols FROM items WHERE id = ?", arrayOf("${remote.id}")).use { c -> if (c.moveToFirst()) item(c, bookId) else null }
+            if (local == null) {
+                putItem(db, bookId, remote, SQLiteDatabase.CONFLICT_IGNORE)
+                if (remote.deleted == 0L) changed += remote.page
+            } else {
+                val merged = SketchMerge.item(local, remote)
+                if (merged != local) {
+                    putItem(db, bookId, merged, SQLiteDatabase.CONFLICT_REPLACE)
+                    changed += local.page; changed += merged.page
+                }
+                if (merged != remote) itemsBehind = true
+            }
+        }, onAsset = { name, stream -> receiveAsset(name, stream) })
         if (changed.isNotEmpty() || metaChanged) db.execSQL("UPDATE books SET updated = ? WHERE id = ?", arrayOf<Any>(System.currentTimeMillis(), bookId))
         // Does the file lack anything this device has? Then it needs writing back.
         val (live, gone) = db.rawQuery("SELECT SUM(deleted = 0), SUM(deleted > 0) FROM strokes WHERE book = ?", arrayOf(bookId)).use { c ->
@@ -311,6 +424,8 @@ class SketchStore private constructor(context: Context) : SQLiteOpenHelper(conte
         val theirs = remoteMeta
         val settingsDiffer = ours == null || theirs == null || ours.title != theirs.title || ours.titleTime != theirs.titleTime ||
             ours.paper != theirs.paper || ours.paperTime != theirs.paperTime || ours.pages != theirs.pages
-        MergeResult(bookId, created, changed, metaChanged, live != remoteStrokes || gone != remoteDeleted || settingsDiffer)
+        val localItems = db.rawQuery("SELECT COUNT(*) FROM items WHERE book = ?", arrayOf(bookId)).use { c -> if (c.moveToFirst()) c.getInt(0) else 0 }
+        MergeResult(bookId, created, changed, metaChanged,
+            live != remoteStrokes || gone != remoteDeleted || settingsDiffer || localItems != remoteItems || itemsBehind)
     }
 }

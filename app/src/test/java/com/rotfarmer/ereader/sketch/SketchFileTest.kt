@@ -74,6 +74,42 @@ class SketchFileTest {
         } catch (e: IOException) { /* expected */ }
     }
 
+    private fun item(id: Long, time: Long, x: Float = 0.1f, deleted: Long = 0L) =
+        SketchItem(id, 2, SketchItem.PICTURE, "a".repeat(64) + ".jpg", 0, x, 0.2f, 0.5f, 0.4f, 1L, time, deleted)
+
+    @Test fun picturesAndTheirFilesTravelInTheFile() {
+        val pdfName = "b".repeat(64) + ".pdf"
+        val items = listOf(item(1, 10), item(2, 11, deleted = 12), SketchItem(3, 5, SketchItem.DOCUMENT, pdfName, 7, 0f, 0f, 1f, 1.29f, 1L, 1L))
+        val jpg = ByteArray(5000) { (it % 251).toByte() }
+        val pdf = "%PDF-1.4 fake".toByteArray()
+        val out = ByteArrayOutputStream()
+        SketchFile.write(out, meta, deleted = {}, strokes = { emit -> emit(stroke(9, 0)) }, items = items,
+            assets = listOf(items[0].asset to { ByteArrayInputStream(jpg) }, pdfName to { ByteArrayInputStream(pdf) }))
+        val readItems = ArrayList<SketchItem>()
+        val files = HashMap<String, ByteArray>()
+        SketchFile.read(ByteArrayInputStream(out.toByteArray()), {}, { _, _ -> }, {}, { readItems += it }, { name, input -> files[name] = input.readBytes() })
+        assertEquals(items, readItems)
+        assertArrayEquals(jpg, files[items[0].asset])
+        assertArrayEquals(pdf, files[pdfName])
+    }
+
+    @Test fun drawingOnlySketchbooksStayReadableByOlderVersions() {
+        // Version 1 is written when nothing is placed, so devices that haven't updated still sync.
+        val bytes = write(meta, emptyList(), listOf(stroke(1, 0)))
+        val v = java.io.DataInputStream(java.util.zip.ZipInputStream(ByteArrayInputStream(bytes)).also { it.nextEntry }).run { readUTF(); readInt() }
+        assertEquals(1, v)
+    }
+
+    @Test fun aRemovedPictureStaysRemovedAndTheNewestPositionWins() {
+        val moved = item(1, 20, x = 0.6f)
+        val old = item(1, 10, x = 0.1f)
+        assertEquals(0.6f, SketchMerge.item(old, moved).x, 0f)
+        assertEquals(0.6f, SketchMerge.item(moved, old).x, 0f)
+        val removed = item(1, 15, deleted = 15)
+        assertTrue(SketchMerge.item(moved, removed).deleted > 0)
+        assertTrue(SketchMerge.item(removed, moved).deleted > 0)
+    }
+
     @Test fun newerSettingsWinAndPagesOnlyGrow() {
         val local = meta.copy(title = "Old", titleTime = 10, paper = 0, paperTime = 50, pages = 400)
         val remote = meta.copy(title = "New", titleTime = 20, paper = 2, paperTime = 40, pages = 350)

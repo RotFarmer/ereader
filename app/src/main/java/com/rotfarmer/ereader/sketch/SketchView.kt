@@ -33,6 +33,10 @@ class SketchView(context: Context, private val settings: Settings) : View(contex
         fun onStrokeAdded(stroke: InkStroke)
         fun onStrokesErased(strokes: List<InkStroke>)
         fun onTurn(step: Int)
+        /** A finger long-pressed a picture (or tapped away from the selected one: null). */
+        fun onItemSelected(item: SketchItem?)
+        /** The selected picture was moved or resized. */
+        fun onItemChanged(before: SketchItem, after: SketchItem)
     }
 
     var listener: Listener? = null
@@ -46,6 +50,27 @@ class SketchView(context: Context, private val settings: Settings) : View(contex
 
     private var strokes = ArrayList<InkStroke>()
     val pageStrokes: List<InkStroke> get() = strokes
+
+    // Pictures and document pages placed under the drawing.
+    private var items: List<SketchItem> = emptyList()
+    val pageItems: List<SketchItem> get() = items
+    private val bitmaps = HashMap<Long, android.graphics.Bitmap>()
+    var selected: SketchItem? = null; private set
+    private var dragMode = 0 // 1 move, 2 resize
+    private var dragStart: SketchItem? = null
+    private var pressCandidate: SketchItem? = null
+    private var pressConsumed = false
+    private val longPress = Runnable {
+        val it = pressCandidate ?: return@Runnable
+        pressConsumed = true
+        performHapticFeedback(android.view.HapticFeedbackConstants.LONG_PRESS)
+        select(it)
+        listener?.onItemSelected(it)
+        // Keep dragging without lifting the finger.
+        dragMode = 1; dragStart = it
+    }
+    /** Page width in pixels at normal zoom (for loading pictures at the right size). */
+    val pageWidthPx: Float get() = if (fitW > 1f) fitW else resources.displayMetrics.widthPixels * 0.8f
     private val painter = InkPainter()
     private val livePainter = InkPainter()
     private val density = resources.displayMetrics.density
@@ -88,6 +113,7 @@ class SketchView(context: Context, private val settings: Settings) : View(contex
         resetPen()
         page = index
         strokes = ArrayList(list)
+        items = emptyList(); bitmaps.clear(); selected = null; dragMode = 0
         zoom = 1f; panX = 0f; panY = 0f
         contentChanged()
     }
@@ -97,6 +123,24 @@ class SketchView(context: Context, private val settings: Settings) : View(contex
         strokes = ArrayList(list)
         contentChanged()
     }
+
+    /** Replaces what's placed on this page, keeping pictures already loaded. */
+    fun setItems(list: List<SketchItem>) {
+        items = list
+        val ids = list.mapTo(HashSet()) { it.id }
+        bitmaps.keys.retainAll(ids)
+        selected = selected?.let { s -> list.firstOrNull { it.id == s.id } }
+        if (dragMode != 0 && selected == null) dragMode = 0
+        contentChanged()
+    }
+
+    fun setItemBitmap(id: Long, bmp: android.graphics.Bitmap) {
+        if (items.none { it.id == id }) return
+        bitmaps[id] = bmp
+        contentChanged()
+    }
+
+    fun select(item: SketchItem?) { selected = item; invalidate() }
 
     fun refreshPen() {
         livePainter.sensitivity = settings.pressure
@@ -132,7 +176,7 @@ class SketchView(context: Context, private val settings: Settings) : View(contex
             nodeWidth = w
             node.setPosition(0, 0, ceil(w).toInt(), ceil(h).toInt())
             val rc = node.beginRecording()
-            try { SketchRender.drawPage(rc, w, paper, strokes, dark, settings.pressure, painter, max(1f, density * 0.6f)) }
+            try { SketchRender.drawPage(rc, w, paper, strokes, dark, settings.pressure, painter, max(1f, density * 0.6f), items) { bitmaps[it.id] } }
             finally { node.endRecording() }
             nodeDirty = false
         }
@@ -144,11 +188,12 @@ class SketchView(context: Context, private val settings: Settings) : View(contex
         val o = dp(1.2f) / zoom
         for (k in 1..3) c.drawRect(-o * k * 0.4f, o * k * 0.5f, w + o * k * 0.4f, h + o * k, shadow)
         if (c.isHardwareAccelerated) c.drawRenderNode(node)
-        else SketchRender.drawPage(c, w, paper, strokes, dark, settings.pressure, painter, max(1f, density * 0.6f))
+        else SketchRender.drawPage(c, w, paper, strokes, dark, settings.pressure, painter, max(1f, density * 0.6f), items) { bitmaps[it.id] }
         outline.color = if (dark) 0xFF2E2E2E.toInt() else 0xFFCFCAC0.toInt()
         outline.strokeWidth = dp(1f) / zoom
         c.drawRect(0f, 0f, w, h, outline)
         c.restore()
+        selected?.let { drawSelection(c, it) }
 
         if (liveCount > 0 && !penErasing) {
             c.save()
@@ -172,6 +217,58 @@ class SketchView(context: Context, private val settings: Settings) : View(contex
                 c.drawCircle(hoverX, hoverY, max(dp(2f), dp(settings.toolWidth(tool)) / 2), shadow)
             }
         }
+    }
+
+    private val selectPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.STROKE }
+
+    private fun itemRect(it: SketchItem) = android.graphics.RectF(
+        originX + it.x * scale, originY + it.y * scale, originX + (it.x + it.w) * scale, originY + (it.y + it.h) * scale)
+
+    private fun drawSelection(c: Canvas, it: SketchItem) {
+        val r = itemRect(it)
+        selectPaint.color = if (dark) 0xFF8FB8FF.toInt() else 0xFF2F5DB8.toInt()
+        selectPaint.strokeWidth = dp(2f)
+        selectPaint.pathEffect = android.graphics.DashPathEffect(floatArrayOf(dp(6f), dp(4f)), 0f)
+        selectPaint.style = Paint.Style.STROKE
+        c.drawRect(r, selectPaint)
+        selectPaint.pathEffect = null
+        selectPaint.style = Paint.Style.FILL
+        c.drawCircle(r.right, r.bottom, dp(9f), selectPaint)
+        selectPaint.color = SketchRender.paperColor(dark)
+        c.drawCircle(r.right, r.bottom, dp(4f), selectPaint)
+    }
+
+    /** The topmost placed item under a screen point. */
+    private fun itemAt(x: Float, y: Float): SketchItem? = items.lastOrNull { itemRect(it).contains(x, y) }
+
+    private fun onHandle(it: SketchItem, x: Float, y: Float): Boolean {
+        val r = itemRect(it)
+        return hypot(x - r.right, y - r.bottom) < dp(28f)
+    }
+
+    /** Moves or resizes the selected item with the finger, live. */
+    private fun dragTo(x: Float, y: Float) {
+        val start = dragStart ?: return
+        val dx = (x - fDownX) / scale; val dy = (y - fDownY) / scale
+        val next = if (dragMode == 2) {
+            val w = (start.w + dx).coerceIn(0.05f, 3f)
+            start.copy(w = w, h = w * start.h / start.w)
+        } else {
+            start.copy(x = (start.x + dx).coerceIn(-start.w + 0.05f, 0.95f), y = (start.y + dy).coerceIn(-start.h + 0.05f, SketchFile.ASPECT - 0.05f))
+        }
+        items = items.map { if (it.id == next.id) next else it }
+        selected = next
+        contentChanged()
+    }
+
+    private fun endDrag(commit: Boolean) {
+        val start = dragStart
+        val now = selected
+        if (start != null && now != null && dragMode != 0) {
+            if (commit && (now.x != start.x || now.y != start.y || now.w != start.w)) listener?.onItemChanged(start, now)
+            else if (!commit) { items = items.map { if (it.id == start.id) start else it }; selected = start; contentChanged() }
+        }
+        dragMode = 0; dragStart = null
     }
 
     // ------------------------------------------------------------------ input
@@ -258,14 +355,32 @@ class SketchView(context: Context, private val settings: Settings) : View(contex
     private fun finger(e: MotionEvent, act: Int): Boolean {
         when (act) {
             MotionEvent.ACTION_DOWN -> {
-                fActive = true; fMulti = false; pinched = false
+                fActive = true; fMulti = false; pinched = false; pressConsumed = false
                 fDownX = e.x; fDownY = e.y; fLastX = e.x; fLastY = e.y
                 fIgnore = palmLikely()
-                if (!fIgnore && settings.fingerDraw) startPen(e, 0, false, finger = true)
+                if (fIgnore) return true
+                val sel = selected
+                if (sel != null) {
+                    // Drag the selected picture or its corner; touching elsewhere lets it go.
+                    when {
+                        onHandle(sel, e.x, e.y) -> { dragMode = 2; dragStart = sel; pressConsumed = true; return true }
+                        itemRect(sel).contains(e.x, e.y) -> { dragMode = 1; dragStart = sel; pressConsumed = true; return true }
+                        else -> { select(null); listener?.onItemSelected(null) }
+                    }
+                }
+                if (settings.fingerDraw) { startPen(e, 0, false, finger = true); return true }
+                pressCandidate = itemAt(e.x, e.y)
+                if (pressCandidate != null) postDelayed(longPress, 450)
             }
-            MotionEvent.ACTION_POINTER_DOWN -> if (fActive && !fIgnore && e.pointerCount >= 2) startPinch(e)
+            MotionEvent.ACTION_POINTER_DOWN -> {
+                removeCallbacks(longPress)
+                if (dragMode != 0) endDrag(commit = false)
+                if (fActive && !fIgnore && e.pointerCount >= 2) startPinch(e)
+            }
             MotionEvent.ACTION_MOVE -> {
                 if (!fActive || fIgnore) return true
+                if (dragMode != 0) { dragTo(e.x, e.y); return true }
+                if (hypot(e.x - fDownX, e.y - fDownY) > slop) removeCallbacks(longPress)
                 if (fMulti && e.pointerCount >= 2) {
                     val d = hypot(e.getX(0) - e.getX(1), e.getY(0) - e.getY(1)).coerceAtLeast(1f)
                     val cx = (e.getX(0) + e.getX(1)) / 2; val cy = (e.getY(0) + e.getY(1)) / 2
@@ -289,7 +404,9 @@ class SketchView(context: Context, private val settings: Settings) : View(contex
                 }
             }
             MotionEvent.ACTION_UP -> {
-                if (fActive && !fIgnore && !fMulti && !pinched && zoom <= 1.01f) {
+                removeCallbacks(longPress)
+                if (dragMode != 0) { endDrag(commit = true); fActive = false; return true }
+                if (fActive && !fIgnore && !fMulti && !pinched && !pressConsumed && zoom <= 1.01f) {
                     val dx = e.x - fDownX; val dy = e.y - fDownY
                     if (abs(dx) > max(dp(60f), width * 0.1f) && abs(dx) > abs(dy) * 1.4f) listener?.onTurn(if (dx < 0) 1 else -1)
                 }
@@ -317,7 +434,11 @@ class SketchView(context: Context, private val settings: Settings) : View(contex
         panX = panX.coerceIn(minX, maxX); panY = panY.coerceIn(minY, maxY)
     }
 
-    private fun cancelFinger() { fActive = false; fMulti = false }
+    private fun cancelFinger() {
+        removeCallbacks(longPress)
+        if (dragMode != 0) endDrag(commit = false)
+        fActive = false; fMulti = false
+    }
 
     // ------------------------------------------------------------------ pen
 
