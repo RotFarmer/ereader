@@ -12,8 +12,10 @@ object Tools {
     const val MARKER = 4
     const val HIGHLIGHTER = 5
     const val ERASER = 6
+    const val BRUSH = 7
+    const val SOFT_BRUSH = 8
 
-    val DRAWING = intArrayOf(PEN, FOUNTAIN, CALLIGRAPHY, PENCIL, MARKER, HIGHLIGHTER)
+    val DRAWING = intArrayOf(PEN, FOUNTAIN, CALLIGRAPHY, PENCIL, MARKER, HIGHLIGHTER, BRUSH, SOFT_BRUSH)
 
     fun name(tool: Int): String = when (tool) {
         PEN -> "Ballpoint"
@@ -23,6 +25,8 @@ object Tools {
         MARKER -> "Marker"
         HIGHLIGHTER -> "Highlighter"
         ERASER -> "Eraser"
+        BRUSH -> "Brush"
+        SOFT_BRUSH -> "Soft brush"
         else -> "Pen"
     }
 
@@ -35,12 +39,16 @@ object Tools {
         MARKER -> 3.5f
         HIGHLIGHTER -> 16f
         ERASER -> 14f
+        BRUSH -> 5f
+        SOFT_BRUSH -> 16f
         else -> 2f
     }
 
     fun minWidth(tool: Int): Float = when (tool) {
         HIGHLIGHTER -> 6f
         ERASER -> 6f
+        BRUSH -> 0.8f
+        SOFT_BRUSH -> 4f
         else -> 0.6f
     }
 
@@ -49,6 +57,8 @@ object Tools {
         ERASER -> 50f
         CALLIGRAPHY -> 14f
         MARKER -> 14f
+        BRUSH -> 24f
+        SOFT_BRUSH -> 40f
         else -> 9f
     }
 
@@ -56,6 +66,7 @@ object Tools {
         HIGHLIGHTER -> 0xFFFFE14D.toInt()
         MARKER -> 0xFF2F5DB8.toInt()
         PENCIL -> 0xFF3A3A3A.toInt()
+        SOFT_BRUSH -> 0xFF4A4A4A.toInt()
         else -> 0xFF1A1A1A.toInt()
     }
 

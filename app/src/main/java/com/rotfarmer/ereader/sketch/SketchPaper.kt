@@ -7,14 +7,13 @@ import android.graphics.RectF
 
 /** The same page treatment at full size and in the library preview. */
 object SketchPaper {
-    private val paint = Paint(Paint.ANTI_ALIAS_FLAG)
-
-    fun draw(canvas: Canvas, rect: RectF, style: Int, density: Float, dark: Boolean) {
+    fun draw(canvas: Canvas, rect: RectF, style: Int, density: Float, dark: Boolean, spacing: Float = 1f) {
+        val paint = Paint(Paint.ANTI_ALIAS_FLAG)
         paint.style = Paint.Style.FILL
         paint.alpha = 255
         paint.color = if (dark) 0xFF202020.toInt() else Color.WHITE
         canvas.drawRect(rect, paint)
-        val step = rect.width() / 24f
+        val step = rect.width() / 24f * spacing.coerceIn(0.5f, 3f)
         paint.color = if (dark) 0xFF3B4141.toInt() else 0xFFD8DFDF.toInt()
         paint.strokeWidth = (0.8f * density).coerceAtLeast(0.5f)
         paint.style = Paint.Style.STROKE

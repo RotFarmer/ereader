@@ -2,588 +2,210 @@ package com.rotfarmer.ereader.sketch
 
 import android.app.Activity
 import android.content.Intent
-import android.graphics.Bitmap
-import android.graphics.BitmapFactory
-import android.graphics.Canvas
-import android.graphics.Color
-import android.graphics.Paint
-import android.graphics.RectF
-import android.os.Bundle
 import android.content.res.Configuration
-import android.view.Gravity
-import android.view.MotionEvent
-import android.view.View
-import android.view.ViewGroup
-import android.view.WindowInsets
-import android.widget.FrameLayout
-import android.widget.LinearLayout
-import android.widget.SeekBar
-import android.widget.TextView
-import android.widget.Toast
+import android.graphics.Bitmap
+import android.net.Uri
+import android.os.Bundle
+import android.text.InputType
+import android.view.*
+import android.widget.*
 import com.rotfarmer.ereader.App
-import com.rotfarmer.ereader.ink.Anchor
-import com.rotfarmer.ereader.ink.InkPainter
-import com.rotfarmer.ereader.ink.InkStroke
-import com.rotfarmer.ereader.ink.Placement
 import com.rotfarmer.ereader.ink.Tools
-import com.rotfarmer.ereader.ui.IconButton
-import com.rotfarmer.ereader.ui.Icons
-import com.rotfarmer.ereader.ui.PenToolbar
-import com.rotfarmer.ereader.ui.TextButton
-import com.rotfarmer.ereader.ui.ToolOptions
-import com.rotfarmer.ereader.ui.UiColors
-import com.rotfarmer.ereader.ui.dialog
-import com.rotfarmer.ereader.ui.dp
-import com.rotfarmer.ereader.ui.label
-import com.rotfarmer.ereader.render.ReaderColors
-import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.SupervisorJob
-import kotlinx.coroutines.cancel
-import kotlinx.coroutines.launch
-import kotlinx.coroutines.withContext
-import java.io.File
-import kotlin.math.hypot
-import kotlin.math.abs
+import com.rotfarmer.ereader.ui.*
+import kotlinx.coroutines.*
+import org.json.JSONArray
+import org.json.JSONObject
 
-/** Full page S Pen canvas. Only the open page and its reference bitmaps are loaded. */
-class SketchActivity : Activity(), PenToolbar.Callbacks {
+/** Library sketchbook editor. Rendering, geometry, IO and page browsing have independent owners. */
+class SketchActivity:Activity(),PenToolbar.Callbacks {
     private val app by lazy { App.of(this) }
-    private val store by lazy { SketchStore(this) }
-    private val settings get() = app.settings
-    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
-    private val ui get() = UiColors(settings.dark)
-    private var bookId = -1L
-    private var book: Sketchbook? = null
-    private var pageIndex = 0
-    private var page = SketchPage(0, emptyList(), emptyList())
-    private var generation = 0
-    private lateinit var root: FrameLayout
-    private lateinit var canvas: SketchCanvasView
-    private lateinit var pageLabel: TextView
-    private lateinit var pageHint: TextView
-    private lateinit var titleLabel: TextView
-    private lateinit var topBar: LinearLayout
-    private lateinit var bottomBar: LinearLayout
-    private lateinit var arrangeDone: TextButton
-    private var penToggle: IconButton? = null
-    private var chromeVisible = false
-    private var toolbar: PenToolbar? = null
-    private val undo = ArrayDeque<InkEdit>()
-    private val redo = ArrayDeque<InkEdit>()
-    private var arranging = false
-    private var selectedRef = -1L
-    private var loading = false
+    internal val settings get()=app.settings
+    internal val colors get()=UiColors(settings.dark)
+    internal val store by lazy { SketchStore(this) }
+    internal val scope=CoroutineScope(SupervisorJob()+Dispatchers.Main)
+    internal var bookId=-1L;private set
+    internal var book:Sketchbook?=null;private set
+    internal var info:PageInfo?=null;private set
+    internal var page=SketchPage(0,emptyList(),emptyList());private set
+    private lateinit var writer:SketchWriter
+    private lateinit var root:LinearLayout
+    private lateinit var header:LinearLayout
+    private lateinit var workspace:LinearLayout
+    private lateinit var frame:FrameLayout
+    internal lateinit var canvas:SketchCanvas;private set
+    private lateinit var status:TextView
+    private lateinit var title:TextView
+    private lateinit var counter:TextView
+    private lateinit var tools:TextButton
+    private lateinit var reveal:TextButton
+    private var toolbar:PenToolbar?=null
+    private var dock:LinearLayout?=null
+    private var dockKey=""
+    private var dockRefId=-1L
+    private var historyGeneration=0
+    private var focus=false
+    private var loading=false
+    private var exportKind="pdf"
+    private var exportIds=emptyList<Long>()
+    private var exportDark=false
+    private var pendingImport:SketchImportSession?=null
+    private var initial=true
 
-    private data class InkEdit(val added: List<InkStroke>, val removed: List<InkStroke>)
-
-    override fun onCreate(savedInstanceState: Bundle?) {
-        super.onCreate(savedInstanceState)
-        bookId = intent.getLongExtra(EXTRA_BOOK, -1)
-        book = store.get(bookId)
-        if (book == null) { finish(); return }
-        pageIndex = book!!.currentPage
-        build()
-        loadPage()
+    override fun onCreate(savedInstanceState:Bundle?) {
+        super.onCreate(savedInstanceState);bookId=intent.getLongExtra(EXTRA_BOOK,-1)
+        writer=SketchWriter.get(this,bookId);build()
+        writer.listener={ state -> status.text=state;if(!writer.busy)refreshHistory() }
+        status.text=writer.state
+        io({val b=store.get(bookId) ?: error("Sketchbook missing");Triple(b,store.info(bookId,b.currentPage),store.page(bookId,b.currentPage))}) {
+            book=it.first;show(it.second,it.third)
+            if(initial){initial=false;receiveExcerpt()}
+        }
     }
-
-    override fun onDestroy() {
-        generation++
-        scope.cancel()
-        if (::canvas.isInitialized) canvas.dispose()
-        super.onDestroy()
-    }
-
-    override fun onStop() {
-        page.references.firstOrNull { it.id == selectedRef }?.let(store::updateReference)
-        super.onStop()
-    }
-
-    override fun onConfigurationChanged(newConfig: Configuration) {
-        super.onConfigurationChanged(newConfig)
-        build()
-        canvas.setPage(page)
-        toolbar?.setUndoState(undo.isNotEmpty(), redo.isNotEmpty())
-    }
-
+    override fun onDestroy(){writer.listener=null;scope.cancel();if(::canvas.isInitialized)canvas.dispose();pendingImport?.close();super.onDestroy()}
+    override fun onConfigurationChanged(newConfig:Configuration){super.onConfigurationChanged(newConfig);build();info?.let { canvas.setPage(page,it) };refreshHistory()}
+    @Deprecated("Activity back callback") override fun onBackPressed(){writer.afterSaved { finish() };if(writer.error!=null)toast("Tap the save message to retry before leaving.")}
     private fun build() {
-        if (::canvas.isInitialized) canvas.dispose()
-        val colors = ui
-        root = FrameLayout(this).apply {
-            setBackgroundColor(ReaderColors(settings.dark).paper)
-            setOnApplyWindowInsetsListener { view, insets ->
-                view.setPadding(0, 0, 0, insets.getInsets(WindowInsets.Type.navigationBars()).bottom)
-                insets
-            }
-        }
-        canvas = SketchCanvasView()
-        root.addView(canvas, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
-        toolbar = PenToolbar(this, colors, settings, this, showInsertSpace = false).apply { visibility = if (settings.toolbarVisible) View.VISIBLE else View.GONE }
-        root.addView(toolbar, FrameLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT,
-            Gravity.CENTER_VERTICAL or if (settings.toolbarRight) Gravity.END else Gravity.START).apply {
-            marginStart = dp(6); marginEnd = dp(6)
+        if(::canvas.isInitialized)canvas.dispose()
+        dock=null;dockKey=""
+        val ui=colors
+        root=LinearLayout(this).apply { orientation=LinearLayout.VERTICAL;setBackgroundColor(ui.bg)
+            setOnApplyWindowInsetsListener { v,ins -> val bars=ins.getInsets(WindowInsets.Type.systemBars());v.setPadding(bars.left,bars.top,bars.right,bars.bottom);ins } }
+        header=LinearLayout(this).apply { gravity=Gravity.CENTER_VERTICAL;setPadding(dp(6),0,dp(6),0) }
+        header.addView(IconButton(this,Icons.BACK,ui).apply { contentDescription="Back to library";setOnClickListener { onBackPressed() } })
+        title=label(this,book?.title ?: "Sketchbook",ui,17f,serif=true).apply { maxLines=1;ellipsize=android.text.TextUtils.TruncateAt.END }
+        header.addView(title,LinearLayout.LayoutParams(0,dp(48),1f).apply { gravity=Gravity.CENTER_VERTICAL })
+        status=label(this,if(::writer.isInitialized)writer.state else "Loading…",ui,12f,ui.muted).apply { gravity=Gravity.CENTER;setPadding(dp(8),0,dp(8),0);setOnClickListener { writer.retry() } }
+        header.addView(status)
+        header.addView(IconButton(this,Icons.STORIES,ui).apply { contentDescription="References";setOnClickListener { references() } })
+        header.addView(IconButton(this,Icons.LIBRARY_ADD,ui).apply { contentDescription="Import reference";setOnClickListener { pickReference() } })
+        header.addView(IconButton(this,Icons.MORE,ui).apply { contentDescription="Sketchbook options";setOnClickListener { options() } })
+        root.addView(header,LinearLayout.LayoutParams(-1,dp(52)))
+        root.addView(View(this).apply { setBackgroundColor(ui.line) },LinearLayout.LayoutParams(-1,dp(1)))
+        workspace=LinearLayout(this).apply { orientation=if(resources.configuration.orientation==Configuration.ORIENTATION_LANDSCAPE)LinearLayout.HORIZONTAL else LinearLayout.VERTICAL }
+        frame=FrameLayout(this)
+        canvas=SketchCanvas(this,settings,store.referencesDir,{before,after -> edit(before,after)},{z,x,y,r ->
+            info=info?.copy(zoom=z,panX=x,panY=y,rotation=r);info?.let { writer.viewport(it) }
         })
-
-        topBar = LinearLayout(this).apply {
-            gravity = Gravity.CENTER_VERTICAL
-            setPadding(dp(6), 0, dp(6), 0)
-            setBackgroundColor(colors.bg)
-            visibility = if (chromeVisible) View.VISIBLE else View.GONE
+        frame.addView(canvas,FrameLayout.LayoutParams(-1,-1))
+        toolbar=PenToolbar(this,ui,settings,this,showInsertSpace=false).apply { visibility=if(settings.toolbarVisible && !focus)View.VISIBLE else View.GONE }
+        frame.addView(toolbar,FrameLayout.LayoutParams(-2,-2,Gravity.CENTER_VERTICAL or if(settings.toolbarRight)Gravity.END else Gravity.START).apply { marginStart=dp(6);marginEnd=dp(6) })
+        reveal=TextButton(this,"Show controls",ui).apply { visibility=if(focus)View.VISIBLE else View.GONE;setOnClickListener { focus=false;applyFocus() } }
+        frame.addView(reveal,FrameLayout.LayoutParams(-2,dp(48),Gravity.TOP or Gravity.END))
+        workspace.addView(frame,if(workspace.orientation==LinearLayout.HORIZONTAL)LinearLayout.LayoutParams(0,-1,1f) else LinearLayout.LayoutParams(-1,0,1f))
+        root.addView(workspace,LinearLayout.LayoutParams(-1,0,1f))
+        val nav=LinearLayout(this).apply { gravity=Gravity.CENTER_VERTICAL;setPadding(dp(6),0,dp(6),0) }
+        nav.addView(IconButton(this,Icons.CHEV_LEFT,ui).apply { contentDescription="Previous page";setOnClickListener { navigate((info?.index ?: 0)-1) } })
+        counter=label(this,"",ui,14f,bold=true).apply { gravity=Gravity.CENTER;minHeight=dp(48);contentDescription="Browse sketchbook pages";setOnClickListener { browse() } }
+        nav.addView(counter,LinearLayout.LayoutParams(0,dp(48),1f))
+        nav.addView(IconButton(this,Icons.CHEV_RIGHT,ui).apply { contentDescription="Next page";setOnClickListener { navigate((info?.index ?: 0)+1) } })
+        tools=TextButton(this,"Draw",ui).apply { setOnClickListener { if(canvas.referenceId!=null)finishArranging() else drawingTools() } };nav.addView(tools)
+        nav.addView(TextButton(this,"Fit",ui).apply { setOnClickListener { canvas.fit() } })
+        nav.addView(TextButton(this,"Focus",ui).apply { setOnClickListener { focus=!focus;applyFocus() } })
+        root.addView(nav,LinearLayout.LayoutParams(-1,dp(52)))
+        setContentView(root);updateLabels();refreshDock();applyFocus()
+    }
+    private fun applyFocus(){header.visibility=if(focus)View.GONE else View.VISIBLE;root.getChildAt(root.childCount-1).visibility=if(focus)View.GONE else View.VISIBLE;toolbar?.visibility=if(settings.toolbarVisible && !focus)View.VISIBLE else View.GONE;reveal.visibility=if(focus)View.VISIBLE else View.GONE}
+    private fun updateLabels(){title.text=book?.title ?: "Sketchbook";counter.text=info?.let { "${it.index+1} / ${book?.pageCount ?: 350}" } ?: "Loading…"}
+    internal fun toast(text:String){Toast.makeText(this,text,Toast.LENGTH_LONG).show()}
+    internal fun <T> io(work:()->T,done:(T)->Unit={}) {
+        if(loading)return
+        writer.afterSaved {
+            if(isDestroyed || loading)return@afterSaved
+            loading=true;canvas.enabledForInput=false
+            scope.launch { try { val result=withContext(Dispatchers.IO){work()};loading=false;canvas.enabledForInput=true;done(result) }
+                catch(e:CancellationException){throw e}
+                catch(e:Exception){toast(e.message ?: "Could not complete this action")}
+                finally { loading=false;canvas.enabledForInput=true } }
         }
-        topBar.addView(IconButton(this, Icons.BACK, colors).apply { contentDescription = "Back to library"; setOnClickListener { finish() } })
-        titleLabel = label(this, book!!.title, colors, 17f, serif = true).apply { maxLines = 1; ellipsize = android.text.TextUtils.TruncateAt.END; setPadding(dp(8), 0, dp(8), 0) }
-        topBar.addView(titleLabel, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
-        arrangeDone = TextButton(this, "Done", colors).apply {
-            visibility = if (arranging) View.VISIBLE else View.GONE
-            setOnClickListener { arranging = false; selectedRef = -1L; visibility = View.GONE; canvas.invalidate(); showChrome(false) }
-        }
-        topBar.addView(arrangeDone)
-        topBar.addView(IconButton(this, Icons.STORIES, colors).apply { contentDescription = "Reference layers"; setOnClickListener { layers() } })
-        topBar.addView(IconButton(this, Icons.LIBRARY_ADD, colors).apply { contentDescription = "Import a reference"; setOnClickListener { pickReference() } })
-        penToggle = IconButton(this, Icons.DRAW, colors).apply {
-            contentDescription = "Show or hide pen tools"
-            active = settings.toolbarVisible
-            setOnClickListener { settings.toolbarVisible = !settings.toolbarVisible; active = settings.toolbarVisible; toolbar?.visibility = if (settings.toolbarVisible) View.VISIBLE else View.GONE }
-        }
-        topBar.addView(penToggle)
-        topBar.addView(IconButton(this, Icons.MORE, colors).apply { contentDescription = "Sketchbook options"; setOnClickListener { options() } })
-        root.addView(topBar, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(56), Gravity.TOP))
-
-        bottomBar = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            setBackgroundColor(colors.bg)
-            visibility = if (chromeVisible) View.VISIBLE else View.GONE
-        }
-        bottomBar.addView(View(this).apply { setBackgroundColor(colors.line) }, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(1)))
-        val nav = LinearLayout(this).apply { gravity = Gravity.CENTER_VERTICAL; setPadding(dp(12), dp(4), dp(12), dp(8)) }
-        nav.addView(IconButton(this, Icons.CHEV_LEFT, colors).apply { contentDescription = "Previous page"; setOnClickListener { turn(-1) } })
-        pageLabel = label(this, "", colors, 15f, bold = true).apply { gravity = Gravity.CENTER; setOnClickListener { goToPage() } }
-        nav.addView(pageLabel, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
-        nav.addView(IconButton(this, Icons.CHEV_RIGHT, colors).apply { contentDescription = "Next page"; setOnClickListener { turn(1) } })
-        nav.addView(IconButton(this, Icons.ADD, colors).apply { contentDescription = "Add pages"; setOnClickListener { addPagesDialog() } })
-        bottomBar.addView(nav)
-        root.addView(bottomBar, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT, Gravity.BOTTOM))
-        pageHint = label(this, "", colors, 13f, colors.muted).apply {
-            gravity = Gravity.CENTER
-            setPadding(0, dp(8), 0, dp(10))
-            visibility = if (chromeVisible) View.GONE else View.VISIBLE
-            setOnClickListener { showChrome(true) }
-        }
-        root.addView(pageHint, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT, Gravity.BOTTOM))
-        setContentView(root)
-        updateLabels()
+        if(writer.error!=null)toast(writer.error ?: "Save failed")
     }
-
-    private fun showChrome(show: Boolean) {
-        chromeVisible = show
-        topBar.visibility = if (show) View.VISIBLE else View.GONE
-        bottomBar.visibility = if (show) View.VISIBLE else View.GONE
-        pageHint.visibility = if (show) View.GONE else View.VISIBLE
+    private fun show(p:PageInfo,content:SketchPage){info=p;page=content;canvas.setPage(content,p);updateLabels();refreshDock();refreshHistory()}
+    internal fun reload(){val id=info?.id ?: return;io({Triple(store.get(bookId)!!,store.infoById(bookId,id),store.pageById(bookId,id))}){book=it.first;show(it.second,it.third)}}
+    internal fun navigate(index:Int){if(index !in 0 until (book?.pageCount ?: 0))return;io({store.setCurrentPage(bookId,index);Triple(store.get(bookId)!!,store.info(bookId,index),store.page(bookId,index))}){book=it.first;show(it.second,it.third)}}
+    internal fun navigateId(id:Long){io({store.setCurrentId(bookId,id);Triple(store.get(bookId)!!,store.infoById(bookId,id),store.pageById(bookId,id))}){book=it.first;show(it.second,it.third)}}
+    private fun edit(before:SketchPage,after:SketchPage){val id=info?.id ?: return;page=after;writer.enqueue(id,before,after);refreshDock()}
+    internal fun edit(after:SketchPage){val before=page;page=after;canvas.setPage(after);edit(before,after)}
+    private fun refreshHistory(){val id=info?.id ?: return;val request=++historyGeneration;scope.launch { val state=withContext(Dispatchers.IO){store.history(id)};if(info?.id==id && request==historyGeneration)toolbar?.setUndoState(state.first,state.second) }}
+    override fun onUndo(){history(false)}
+    override fun onRedo(){history(true)}
+    private fun history(redo:Boolean){val id=info?.id ?: return;io({store.undo(bookId,id,redo)}){page=it;canvas.setPage(it);refreshDock();refreshHistory()}}
+    override fun onToolChanged(){canvas.mode="Draw";tools.text="Draw";canvas.invalidate()}
+    override fun onToolOptions(anchor:View){sheet("Pen options",ToolOptions(this,colors,settings,settings.tool,{toolbar?.refresh();canvas.invalidate()},null))}
+    override fun onInsertSpace(armed:Boolean){toolbar?.insertArmed=false}
+    override fun onSideChanged(){build();info?.let { canvas.setPage(page,it) }}
+    override fun onExpandedChanged(){refreshHistory()}
+    override fun onHide(){settings.toolbarVisible=false;toolbar?.visibility=View.GONE}
+    internal fun column()=LinearLayout(this).apply { orientation=LinearLayout.VERTICAL;setPadding(dp(16),dp(8),dp(16),dp(8)) }
+    internal fun button(text:String,action:()->Unit)=TextButton(this,text,colors).apply { minHeight=dp(48);setOnClickListener { action() } }
+    internal fun sheet(title:String,body:View):android.app.AlertDialog = dialog(this,settings.dark).setTitle(title).setView(body).setPositiveButton("Done",null).show().also {
+        it.window?.setLayout(minOf(resources.displayMetrics.widthPixels-dp(32),dp(720)),ViewGroup.LayoutParams.WRAP_CONTENT)
     }
-
-    private fun updateLabels() {
-        book = store.get(bookId) ?: return
-        titleLabel.text = book!!.title
-        pageLabel.text = "${pageIndex + 1} / ${book!!.pageCount}"
-        pageHint.text = "${pageIndex + 1} / ${book!!.pageCount}"
-        toolbar?.setUndoState(undo.isNotEmpty(), redo.isNotEmpty())
+    internal fun input(title:String,value:String,numeric:Boolean=false,action:(String)->Unit){val input=EditText(this).apply { setTextColor(colors.fg);setHintTextColor(colors.muted);setSingleLine();setText(value);selectAll();if(numeric)inputType=InputType.TYPE_CLASS_NUMBER }
+        dialog(this,settings.dark).setTitle(title).setView(input).setNegativeButton("Cancel",null).setPositiveButton("Save"){_,_->action(input.text.toString().trim())}.show() }
+    internal fun menu(title:String,items:List<String>,action:(Int)->Unit){dialog(this,settings.dark).setTitle(title).setItems(items.toTypedArray()){_,i->action(i)}.show()}
+    internal fun slider(parent:LinearLayout,name:String,value:Float,min:Float=0f,max:Float=1f,changed:(Float)->Unit){val text=label(this,name,colors,14f);parent.addView(text)
+        parent.addView(SeekBar(this).apply { this.max=100;progress=((value-min)/(max-min)*100).toInt().coerceIn(0,100)
+            setOnSeekBarChangeListener(object:SeekBar.OnSeekBarChangeListener { override fun onStartTrackingTouch(s:SeekBar){};override fun onProgressChanged(s:SeekBar,p:Int,user:Boolean){text.text="$name · ${p}%"};override fun onStopTrackingTouch(s:SeekBar){changed(min+(max-min)*s.progress/100f)} }) }) }
+    private fun options(){menu("Sketchbook",listOf("Paper","Page details","Add pages","Rename sketchbook","Export or backup","Restore backup","Trash","Pen and touch")){when(it){
+        0->paperOptions();1->info?.let { pageMenu(it) };2->input("Add pages","50",true){n->n.toIntOrNull()?.takeIf { it in 1..10000 }?.let { count->io({store.addPages(bookId,count);store.get(bookId)}){book=it;updateLabels()} }}
+        3->input("Rename sketchbook",book?.title.orEmpty()){name->if(name.isNotBlank())io({store.rename(bookId,name);store.get(bookId)}){book=it;updateLabels()}}
+        4->exportOptions();5->startActivityForResult(Intent(Intent.ACTION_OPEN_DOCUMENT).apply { type="application/zip";addCategory(Intent.CATEGORY_OPENABLE) },RESTORE)
+        6->trash();7->touchOptions()
+    }}}
+    private fun paperOptions(){val body=column();val types=listOf("Blank","Lined","Grid","Dotted");types.forEachIndexed { i,name->body.addView(button(if(page.paper==i)"✓ $name" else name){edit(page.copy(paper=i))}) }
+        slider(body,"Spacing",page.spacing,.5f,3f){edit(page.copy(spacing=it))};body.addView(button("Use for new pages"){io({store.defaults(bookId,page.paper,page.spacing)}){toast("New pages will use this paper")}});sheet("Paper",body)}
+    private fun touchOptions(){val body=column();body.addView(button(if(settings.fingerDraw)"Finger drawing: on" else "Finger drawing: off"){settings.fingerDraw=!settings.fingerDraw;toast(if(settings.fingerDraw)"Finger drawing on; use two fingers to navigate" else "S Pen draws; fingers navigate")})
+        slider(body,"Pressure response",settings.pressure,0f,1f){settings.pressure=it;page.strokes.forEach { s->s.shape=null };canvas.invalidate()};body.addView(button("Move toolbar to ${if(settings.toolbarRight)"left" else "right"}"){settings.toolbarRight=!settings.toolbarRight;onSideChanged()});sheet("Pen and touch",body)}
+    private fun drawingTools(){val modes=listOf("Draw","Lasso","Straightedge","Arrow","Rectangle","Ellipse","Copy selection","Paste","Duplicate selection","Delete selection","Eraser mode","Pen presets","Reset rotation","Show pen palette")
+        menu("Drawing tools",modes){i->when(i){in 0..5->{canvas.mode=modes[i];tools.text=modes[i]};6->canvas.copySelection();7->canvas.paste();8->canvas.duplicateSelection();9->canvas.deleteSelection();10->menu("Eraser",listOf("Whole stroke","Partial stroke")){canvas.partialEraser=it==1;settings.tool=Tools.ERASER;toolbar?.refresh()};11->presets();12->canvas.resetRotation();13->{settings.toolbarVisible=true;toolbar?.visibility=View.VISIBLE}}} }
+    private fun presets(){val data=runCatching { JSONArray(settings.prefs.getString("sketchPresets","[]")) }.getOrDefault(JSONArray());val names=(0 until data.length()).map { data.getJSONObject(it).getString("name") }+"Save current pen"
+        menu("Pen presets",names){i->if(i==data.length())input("Preset name","Pen ${i+1}"){name->if(name.isNotBlank()){data.put(JSONObject().put("name",name).put("tool",settings.tool).put("color",settings.toolColor(settings.tool)).put("width",settings.toolWidth(settings.tool)));settings.prefs.edit().putString("sketchPresets",data.toString()).apply()}}
+            else {val p=data.getJSONObject(i);settings.tool=p.getInt("tool");settings.setToolColor(settings.tool,p.getInt("color"));settings.setToolWidth(settings.tool,p.getDouble("width").toFloat());toolbar?.refresh();onToolChanged()} }
     }
-
-    private fun loadPage() {
-        val request = ++generation
-        val current = pageIndex
-        loading = true
-        page = SketchPage(0, emptyList(), emptyList())
-        canvas.setPage(page)
-        selectedRef = -1L
-        arranging = false
-        arrangeDone.visibility = View.GONE
-        undo.clear(); redo.clear()
-        updateLabels()
-        showChrome(false)
-        scope.launch {
-            try {
-                val loaded = withContext(Dispatchers.IO) { store.page(bookId, current) }
-                if (request != generation) return@launch
-                page = loaded
-                canvas.setPage(loaded)
-                toolbar?.setUndoState(false, false)
-            } catch (e: Exception) {
-                if (request == generation) Toast.makeText(this@SketchActivity, e.message ?: "Could not open page", Toast.LENGTH_LONG).show()
-            } finally {
-                if (request == generation) loading = false
-            }
-        }
+    private fun browse(){io({store.pages(bookId)}){pages->SketchPageBrowser(this,pages).show()}}
+    internal fun pageMenu(p:PageInfo){menu("Page ${p.index+1}",listOf("Page title","Section name",if(p.bookmarked)"Remove bookmark" else "Bookmark","Move to page…","Duplicate page","Insert blank page before","Move to Trash")){when(it){
+        0->input("Page title",p.title){name->io({store.metadata(p.copy(title=name))}){if(info?.id==p.id)info=p.copy(title=name)}}
+        1->input("Section name",p.section){name->io({store.metadata(p.copy(section=name))}){if(info?.id==p.id)info=p.copy(section=name)}}
+        2->io({store.metadata(p.copy(bookmarked=!p.bookmarked))}){if(info?.id==p.id)info=p.copy(bookmarked=!p.bookmarked)}
+        3->input("Move to page","${p.index+1}",true){n->val dest=n.toIntOrNull()?.minus(1);if(dest!=null && dest in 0 until book!!.pageCount)io({store.movePage(bookId,p.id,dest);Triple(store.get(bookId)!!,store.infoById(bookId,p.id),store.pageById(bookId,p.id))}){book=it.first;show(it.second,it.third)}}
+        4->io({val id=store.duplicatePage(bookId,p.id);Triple(store.get(bookId)!!,store.infoById(bookId,id),store.pageById(bookId,id))}){book=it.first;show(it.second,it.third)}
+        5->io({val id=store.insertPages(bookId,p.index,1).single();Triple(store.get(bookId)!!,store.infoById(bookId,id),store.pageById(bookId,id))}){book=it.first;show(it.second,it.third)}
+        6->io({store.deletePage(bookId,p.id);val b=store.get(bookId)!!;val n=minOf(p.index,b.pageCount-1);Triple(b,store.info(bookId,n),store.page(bookId,n))}){book=it.first;show(it.second,it.third);toast("Page moved to Trash")}
+    }}}
+    private fun trash(){io({store.trash(bookId)}){items->if(items.isEmpty())toast("Trash is empty") else menu("Restore page",items.map { it.title }){i->io({store.restore(items[i].id,bookId);store.get(bookId)}){book=it;updateLabels()}}}}
+    private fun references(){SketchReferencePanel(this).show()}
+    internal fun arrangeReference(id:Long){val r=page.references.firstOrNull { it.id==id } ?: return;edit(page.copy(references=page.references.map { if(it.id==id)r.copy(locked=false,docked=false,visible=true) else it }));canvas.referenceId=id;tools.text="Done";toast("Drag the reference or its handles; pinch to scale and rotate. S Pen still draws.")}
+    private fun finishArranging(){val id=canvas.referenceId;edit(page.copy(references=page.references.map { if(it.id==id)it.copy(locked=true) else it }));canvas.referenceId=null;tools.text=canvas.mode;canvas.invalidate()}
+    internal fun openSource(ref:ReferenceLayer){io({app.db.book(ref.sourceBook)}){source->if(source==null)toast("The source book is no longer in the library. This reference is still available.") else {
+        val launch=ReaderActivity.intent(this,ref.sourceBook);runCatching { val p=JSONObject(ref.sourceLocation);launch.putExtra(ReaderActivity.EXTRA_START,intArrayOf(p.getInt("block"),p.getInt("offset"))) };startActivity(launch)
+    }}}
+    private fun refreshDock(){if(!::workspace.isInitialized)return
+        val refs=page.references.filter { it.docked && it.visible };val key="${info?.id}|$dockRefId|$refs";if(key==dockKey)return;dockKey=key
+        dock?.let { workspace.removeView(it) };dock=null;if(refs.isEmpty())return
+        val panel=column();dock=panel;val landscape=workspace.orientation==LinearLayout.HORIZONTAL
+        panel.addView(label(this,"References",colors,15f,bold=true));val ref=refs.firstOrNull { it.id==dockRefId } ?: refs.first()
+        val view=SketchReferenceView(this);panel.addView(view,LinearLayout.LayoutParams(-1,0,1f));panel.addView(button(ref.name){menu("Pinned references",refs.map { it.name }){dockRefId=refs[it].id;refreshDock()}})
+        workspace.addView(panel,if(landscape)LinearLayout.LayoutParams(dp(280),-1) else LinearLayout.LayoutParams(-1,dp(260)))
+        val grip=label(this,if(landscape)"↔ Resize" else "↕ Resize",colors,12f,colors.muted).apply { gravity=Gravity.CENTER;minHeight=dp(40) }
+        panel.addView(grip,0);var initialSize=0;var initialTouch=0f
+        grip.setOnTouchListener { _,e->when(e.actionMasked){MotionEvent.ACTION_DOWN->{initialSize=if(landscape)panel.width else panel.height;initialTouch=if(landscape)e.rawX else e.rawY;true};MotionEvent.ACTION_MOVE->{val delta=(initialTouch-(if(landscape)e.rawX else e.rawY)).toInt();val cap=(if(landscape)workspace.width else workspace.height)*2/3;panel.layoutParams=panel.layoutParams.apply { if(landscape)width=(initialSize+delta).coerceIn(dp(180),cap.coerceAtLeast(dp(180))) else height=(initialSize+delta).coerceIn(dp(150),cap.coerceAtLeast(dp(150))) };true};else->true} }
+        scope.launch { val bmp=withContext(Dispatchers.IO){runCatching { SketchRenderer.decode(store.referencesDir,ref,1600) }.getOrNull()};if(dock===panel && bmp!=null)view.display(bmp,ref,settings.dark) else bmp?.recycle() }
     }
-
-    private fun turn(delta: Int) {
-        val next = pageIndex + delta
-        val count = book?.pageCount ?: return
-        if (next !in 0 until count) return
-        pageIndex = next
-        store.setCurrentPage(bookId, pageIndex)
-        loadPage()
+    private fun pickReference(){startActivityForResult(Intent(Intent.ACTION_OPEN_DOCUMENT).apply { addCategory(Intent.CATEGORY_OPENABLE);type="*/*";putExtra(Intent.EXTRA_MIME_TYPES,arrayOf("image/jpeg","image/png","image/webp","application/pdf","application/vnd.openxmlformats-officedocument.wordprocessingml.document","text/plain")) },IMPORT)}
+    private fun exportOptions(){io({store.pages(bookId)}){pages->menu("Export",listOf("Current page as PDF","Used pages as PDF","All pages as PDF","Current page as PNG","Editable backup")){choice->
+        exportKind=if(choice==4)"zip" else if(choice==3)"png" else "pdf";exportIds=when(choice){1->pages.filter { it.used }.map { it.id };2,4->pages.map { it.id };else->listOfNotNull(info?.id)}
+        if(exportIds.isEmpty()){toast("No used pages to export");return@menu}
+        if(exportKind=="zip")createExport() else menu("Export appearance",listOf("Light paper and original colors","Dark appearance")){exportDark=it==1;createExport()}
+    }}}
+    private fun createExport(){startActivityForResult(Intent(Intent.ACTION_CREATE_DOCUMENT).apply { addCategory(Intent.CATEGORY_OPENABLE);type=when(exportKind){"zip"->"application/zip";"png"->"image/png";else->"application/pdf"};putExtra(Intent.EXTRA_TITLE,"${book?.title ?: "Sketchbook"}.$exportKind") },EXPORT)}
+    @Deprecated("Platform activity result API") override fun onActivityResult(requestCode:Int,resultCode:Int,data:Intent?){super.onActivityResult(requestCode,resultCode,data);if(resultCode!=RESULT_OK)return;val uri=data?.data ?: return
+        when(requestCode){IMPORT->prepareImport(uri);EXPORT->io({contentResolver.openOutputStream(uri,"wt")?.use { out->when(exportKind){"zip"->SketchArchive.write(store,bookId,out);"png"->SketchExport.png(store,bookId,exportIds.single(),out,exportDark);else->SketchExport.pdf(store,bookId,exportIds,out,exportDark)} } ?: error("Could not write the selected file")}){toast("Export saved")}
+            RESTORE->io({contentResolver.openInputStream(uri)?.use { SketchArchive.restore(store,it) } ?: error("Could not open backup")}){startActivity(intent(this,it));finish()}}
     }
-
-    private fun choosePaper() {
-        val types = arrayOf("Blank", "Lined", "Grid", "Dotted")
-        dialog(this, settings.dark).setTitle("Paper for page ${pageIndex + 1}")
-            .setSingleChoiceItems(types, page.paper) { d, choice ->
-                store.setPaper(bookId, pageIndex, choice)
-                page = page.copy(paper = choice)
-                canvas.invalidate()
-                d.dismiss()
-            }.show()
-    }
-
-    private fun options() {
-        dialog(this, settings.dark).setItems(arrayOf("Paper for this page", "Reference layers", "Import reference", "Rename sketchbook", "Go to page", "Add pages")) { _, choice ->
-            when (choice) { 0 -> choosePaper(); 1 -> layers(); 2 -> pickReference(); 3 -> rename(); 4 -> goToPage(); 5 -> addPagesDialog() }
-        }.show()
-    }
-
-    private fun rename() {
-        val input = android.widget.EditText(this).apply {
-            setSingleLine(); setTextColor(ui.fg); setHintTextColor(ui.muted)
-            setText(book?.title ?: ""); selectAll()
-        }
-        dialog(this, settings.dark).setTitle("Rename sketchbook").setView(input)
-            .setNegativeButton("Cancel", null).setPositiveButton("Save") { _, _ ->
-                val name = input.text.toString().trim()
-                if (name.isNotEmpty()) { store.rename(bookId, name); updateLabels() }
-            }.show()
-    }
-
-    private fun addPagesDialog() {
-        val input = android.widget.EditText(this).apply {
-            inputType = android.text.InputType.TYPE_CLASS_NUMBER; setTextColor(ui.fg); setHintTextColor(ui.muted); setText("50")
-        }
-        dialog(this, settings.dark).setTitle("Add pages").setView(input)
-            .setNegativeButton("Cancel", null).setPositiveButton("Add") { _, _ ->
-                val count = input.text.toString().toIntOrNull()?.coerceIn(1, 10000) ?: return@setPositiveButton
-                store.addPages(bookId, count); updateLabels()
-            }.show()
-    }
-
-    private fun goToPage() {
-        val input = android.widget.EditText(this).apply {
-            inputType = android.text.InputType.TYPE_CLASS_NUMBER; setTextColor(ui.fg); setHintTextColor(ui.muted); setText("${pageIndex + 1}")
-        }
-        dialog(this, settings.dark).setTitle("Go to page").setView(input)
-            .setNegativeButton("Cancel", null).setPositiveButton("Go") { _, _ ->
-                val target = input.text.toString().toIntOrNull()?.minus(1) ?: return@setPositiveButton
-                if (target in 0 until (book?.pageCount ?: 0)) {
-                    pageIndex = target; store.setCurrentPage(bookId, target); loadPage()
-                }
-            }.show()
-    }
-
-    private fun pickReference() {
-        val intent = Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
-            addCategory(Intent.CATEGORY_OPENABLE)
-            type = "*/*"
-            putExtra(Intent.EXTRA_MIME_TYPES, arrayOf("image/jpeg", "image/png", "image/webp", "application/pdf",
-                "application/vnd.openxmlformats-officedocument.wordprocessingml.document", "text/plain"))
-        }
-        startActivityForResult(intent, PICK_REFERENCE)
-    }
-
-    @Deprecated("Activity result API is sufficient without an additional dependency")
-    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
-        super.onActivityResult(requestCode, resultCode, data)
-        if (requestCode != PICK_REFERENCE || resultCode != RESULT_OK) return
-        val uri = data?.data ?: return
-        val start = pageIndex
-        Toast.makeText(this, "Importing reference…", Toast.LENGTH_SHORT).show()
-        scope.launch {
-            try {
-                val count = withContext(Dispatchers.IO) { SketchImporter(this@SketchActivity, store).import(uri, contentResolver.getType(uri), bookId, start) }
-                if (pageIndex == start) loadPage()
-                updateLabels()
-                Toast.makeText(this@SketchActivity, "Imported $count ${if (count == 1) "page" else "pages"}", Toast.LENGTH_SHORT).show()
-            } catch (e: Exception) {
-                Toast.makeText(this@SketchActivity, e.message ?: "Import failed", Toast.LENGTH_LONG).show()
-            }
-        }
-    }
-
-    private fun layers() {
-        if (page.references.isEmpty()) {
-            Toast.makeText(this, "No references on this page", Toast.LENGTH_SHORT).show(); return
-        }
-        val names = page.references.mapIndexed { index, _ -> "Reference ${index + 1}" }.toTypedArray()
-        dialog(this, settings.dark).setTitle("Reference layers").setItems(names) { _, choice -> referenceOptions(page.references[choice].id) }.show()
-    }
-
-    private fun referenceOptions(id: Long) {
-        val ref = page.references.firstOrNull { it.id == id } ?: return
-        dialog(this, settings.dark).setTitle("Reference layer")
-            .setItems(arrayOf("Move and scale", "Opacity", "Remove reference")) { _, choice ->
-                when (choice) {
-                    0 -> { arranging = true; selectedRef = id; arrangeDone.visibility = View.VISIBLE; showChrome(true); canvas.invalidate(); Toast.makeText(this, "Drag with a finger to move; pinch to scale. S Pen still draws.", Toast.LENGTH_LONG).show() }
-                    1 -> opacity(ref)
-                    2 -> dialog(this, settings.dark).setMessage("Remove this reference? Your drawing stays on the page.")
-                        .setNegativeButton("Cancel", null).setPositiveButton("Remove") { _, _ ->
-                            store.removeReference(bookId, ref)
-                            page = page.copy(references = page.references.filterNot { it.id == id })
-                            selectedRef = -1L; arranging = false; arrangeDone.visibility = View.GONE; canvas.setPage(page)
-                        }.show()
-                }
-            }.show()
-    }
-
-    private fun opacity(ref: ReferenceLayer) {
-        val slider = SeekBar(this).apply { max = 100; progress = (ref.opacity * 100).toInt(); setPadding(dp(20), dp(10), dp(20), dp(10)) }
-        dialog(this, settings.dark).setTitle("Reference opacity").setView(slider)
-            .setNegativeButton("Cancel", null).setPositiveButton("Apply") { _, _ ->
-                changeReference(ref.copy(opacity = (slider.progress / 100f).coerceIn(0.05f, 1f)))
-            }.show()
-    }
-
-    private fun changeReference(ref: ReferenceLayer, persist: Boolean = true) {
-        if (persist) store.updateReference(ref)
-        page = page.copy(references = page.references.map { if (it.id == ref.id) ref else it })
-        canvas.invalidate()
-    }
-
-    private fun addStroke(points: FloatArray, tool: Int) {
-        val temp = InkStroke(-1, bookId, Anchor(Anchor.PDF, pageIndex.toLong(), 0), tool,
-            settings.toolColor(tool), dp(settings.toolWidth(tool)).toFloat() / canvas.paperRect.width(), points, System.currentTimeMillis())
-        val id = store.insertStroke(bookId, pageIndex, temp)
-        val stroke = InkStroke(id, bookId, temp.anchor, temp.tool, temp.color, temp.width, points, temp.created)
-        page = page.copy(strokes = page.strokes + stroke)
-        record(InkEdit(listOf(stroke), emptyList()))
-        canvas.invalidate()
-    }
-
-    private fun eraseAt(x: Float, y: Float, removed: MutableList<InkStroke>) {
-        val r = canvas.paperRect
-        val nx = (x - r.left) / r.width()
-        val ny = (y - r.top) / r.width()
-        val radius = dp(settings.toolWidth(Tools.ERASER)) / r.width()
-        val hits = page.strokes.filter { it !in removed && hitStroke(it, nx, ny, radius) }
-        if (hits.isEmpty()) return
-        hits.forEach { store.deleteStroke(it.id) }
-        removed += hits
-        page = page.copy(strokes = page.strokes.filterNot { it in hits })
-        canvas.invalidate()
-    }
-
-    private fun hitStroke(s: InkStroke, x: Float, y: Float, radius: Float): Boolean {
-        val p = s.pts
-        val tolerance = radius + s.width / 2
-        for (i in 0 until p.size / 3) {
-            val j = i * 3
-            if (i == 0 && hypot(p[j] - x, p[j + 1] - y) <= tolerance) return true
-            if (i == 0) continue
-            val a = j - 3
-            val dx = p[j] - p[a]; val dy = p[j + 1] - p[a + 1]
-            val t = if (dx * dx + dy * dy == 0f) 0f else (((x - p[a]) * dx + (y - p[a + 1]) * dy) / (dx * dx + dy * dy)).coerceIn(0f, 1f)
-            if (hypot(p[a] + t * dx - x, p[a + 1] + t * dy - y) <= tolerance) return true
-        }
-        return false
-    }
-
-    private fun record(edit: InkEdit) { undo.addLast(edit); redo.clear(); toolbar?.setUndoState(true, false) }
-    override fun onUndo() {
-        val edit = undo.removeLastOrNull() ?: return
-        edit.added.forEach { store.deleteStroke(it.id) }
-        edit.removed.forEach { store.restoreStroke(bookId, pageIndex, it) }
-        page = page.copy(strokes = page.strokes.filterNot { it in edit.added } + edit.removed)
-        redo.addLast(edit); canvas.invalidate(); toolbar?.setUndoState(undo.isNotEmpty(), true)
-    }
-    override fun onRedo() {
-        val edit = redo.removeLastOrNull() ?: return
-        edit.removed.forEach { store.deleteStroke(it.id) }
-        edit.added.forEach { store.restoreStroke(bookId, pageIndex, it) }
-        page = page.copy(strokes = page.strokes.filterNot { it in edit.removed } + edit.added)
-        undo.addLast(edit); canvas.invalidate(); toolbar?.setUndoState(true, redo.isNotEmpty())
-    }
-
-    override fun onToolChanged() { canvas.invalidate() }
-    override fun onToolOptions(anchor: View) {
-        val panel = ToolOptions(this, ui, settings, settings.tool, { toolbar?.refresh(); canvas.invalidate() }, null)
-        dialog(this, settings.dark).setView(panel).setPositiveButton("Done", null).show()
-    }
-    override fun onInsertSpace(armed: Boolean) { toolbar?.insertArmed = false }
-    override fun onSideChanged() { build(); canvas.setPage(page) }
-    override fun onExpandedChanged() { toolbar?.setUndoState(undo.isNotEmpty(), redo.isNotEmpty()) }
-    override fun onHide() { toolbar?.visibility = View.GONE; settings.toolbarVisible = false; penToggle?.active = false; showChrome(true) }
-
-    private inner class SketchCanvasView : View(this@SketchActivity) {
-        val paperRect = RectF()
-        private val painter = InkPainter()
-        private val paint = Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG)
-        private val darkReferenceFilter = ReaderColors(true).dimFilter
-        private val bitmaps = HashMap<Long, Bitmap>()
-        private var bitmapGeneration = 0
-        private var live = FloatArray(3 * 128)
-        private var liveCount = 0
-        private var penPointer = -1
-        private var erasing = false
-        private val removed = ArrayList<InkStroke>()
-        private var dragX = 0f
-        private var dragY = 0f
-        private var pinchDistance = 0f
-        private var pinchWidth = 0f
-        private var pinchHeight = 0f
-        private var fingerDownX = 0f
-        private var fingerDownY = 0f
-        private var fingerMulti = false
-
-        fun dispose() { bitmapGeneration++; bitmaps.values.forEach { it.recycle() }; bitmaps.clear() }
-
-        fun setPage(newPage: SketchPage) {
-            bitmapGeneration++
-            bitmaps.values.forEach { it.recycle() }; bitmaps.clear()
-            invalidate()
-            val request = bitmapGeneration
-            scope.launch {
-                for (ref in newPage.references) {
-                    val bitmap = withContext(Dispatchers.IO) {
-                        val path = File(store.referencesDir, ref.path).path
-                        val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
-                        BitmapFactory.decodeFile(path, bounds)
-                        var sample = 1
-                        while (bounds.outWidth / sample > 1600 || bounds.outHeight / sample > 1600) sample *= 2
-                        BitmapFactory.decodeFile(path, BitmapFactory.Options().apply { inSampleSize = sample })
-                    }
-                    if (request != bitmapGeneration) { bitmap?.recycle(); return@launch }
-                    if (bitmap != null) { bitmaps[ref.id] = bitmap; invalidate() }
-                }
-            }
-        }
-
-        override fun onSizeChanged(w: Int, h: Int, oldw: Int, oldh: Int) { super.onSizeChanged(w, h, oldw, oldh); invalidate() }
-
-        override fun onDraw(c: Canvas) {
-            super.onDraw(c)
-            val margin = dp(12).toFloat()
-            val pageW = minOf(width - margin * 2, (height - margin * 2) * 0.707f).coerceAtLeast(1f)
-            val pageH = pageW / 0.707f
-            val left = (width - pageW) / 2
-            val top = (height - pageH) / 2
-            paperRect.set(left, top, left + pageW, top + pageH)
-            SketchPaper.draw(c, paperRect, page.paper, resources.displayMetrics.density, settings.dark)
-            for (ref in page.references) {
-                val b = bitmaps[ref.id] ?: continue
-                paint.alpha = (ref.opacity * 255).toInt().coerceIn(0, 255)
-                paint.style = Paint.Style.FILL
-                paint.colorFilter = if (settings.dark) darkReferenceFilter else null
-                c.drawBitmap(b, null, RectF(left + ref.x * pageW, top + ref.y * pageW,
-                    left + (ref.x + ref.width) * pageW, top + (ref.y + ref.height) * pageW), paint)
-                paint.colorFilter = null
-                if (arranging && selectedRef == ref.id) {
-                    paint.alpha = 255; paint.color = ui.fg; paint.style = Paint.Style.STROKE; paint.strokeWidth = dp(2).toFloat()
-                    c.drawRect(RectF(left + ref.x * pageW, top + ref.y * pageW,
-                        left + (ref.x + ref.width) * pageW, top + (ref.y + ref.height) * pageW), paint)
-                }
-            }
-            c.save(); c.clipRect(paperRect)
-            painter.dark = settings.dark; painter.sensitivity = settings.pressure
-            val placement = Placement(left, top, pageW, null)
-            page.strokes.forEach { painter.draw(c, it, placement) }
-            if (liveCount > 0 && !erasing) painter.drawLive(c, live, liveCount,
-                settings.tool, settings.toolColor(settings.tool), dp(settings.toolWidth(settings.tool)).toFloat())
-            c.restore()
-        }
-
-        override fun onTouchEvent(e: MotionEvent): Boolean {
-            if (loading) return true
-            val action = e.actionMasked
-            val index = e.actionIndex
-            val stylus = e.getToolType(index) == MotionEvent.TOOL_TYPE_STYLUS || e.getToolType(index) == MotionEvent.TOOL_TYPE_ERASER
-            if (action == MotionEvent.ACTION_DOWN && stylus) {
-                penPointer = e.getPointerId(index)
-                erasing = settings.tool == Tools.ERASER || e.getToolType(index) == MotionEvent.TOOL_TYPE_ERASER ||
-                    (e.buttonState and (MotionEvent.BUTTON_STYLUS_PRIMARY or MotionEvent.BUTTON_SECONDARY)) != 0
-                liveCount = 0; removed.clear(); addPenPoint(e.x, e.y, e.getPressure(index))
-                if (erasing) eraseAt(e.x, e.y, removed)
-                invalidate(); return true
-            }
-            if (penPointer >= 0) {
-                val i = e.findPointerIndex(penPointer)
-                if (i < 0) return true
-                when (action) {
-                    MotionEvent.ACTION_MOVE -> {
-                        for (h in 0 until e.historySize) {
-                            val x = e.getHistoricalX(i, h); val y = e.getHistoricalY(i, h)
-                            if (erasing) eraseAt(x, y, removed) else addPenPoint(x, y, e.getHistoricalPressure(i, h))
-                        }
-                        if (erasing) eraseAt(e.getX(i), e.getY(i), removed)
-                        else addPenPoint(e.getX(i), e.getY(i), e.getPressure(i))
-                        invalidate()
-                    }
-                    MotionEvent.ACTION_UP -> {
-                        if (erasing && removed.isNotEmpty()) record(InkEdit(emptyList(), removed.toList()))
-                        else if (!erasing && liveCount > 0) {
-                            val points = FloatArray(liveCount * 3)
-                            for (p in 0 until liveCount) {
-                                points[p * 3] = (live[p * 3] - paperRect.left) / paperRect.width()
-                                points[p * 3 + 1] = (live[p * 3 + 1] - paperRect.top) / paperRect.width()
-                                points[p * 3 + 2] = live[p * 3 + 2]
-                            }
-                            addStroke(points, settings.tool)
-                        }
-                        penPointer = -1; liveCount = 0; invalidate()
-                    }
-                    MotionEvent.ACTION_CANCEL -> { penPointer = -1; liveCount = 0; invalidate() }
-                }
-                return true
-            }
-            if (!arranging) {
-                when (action) {
-                    MotionEvent.ACTION_DOWN -> { fingerDownX = e.x; fingerDownY = e.y; fingerMulti = false }
-                    MotionEvent.ACTION_POINTER_DOWN -> fingerMulti = true
-                    MotionEvent.ACTION_UP -> if (!fingerMulti) {
-                        val dx = e.x - fingerDownX; val dy = e.y - fingerDownY
-                        if (abs(dx) > dp(64) && abs(dx) > abs(dy) * 1.3f) turn(if (dx < 0) 1 else -1)
-                        else if (abs(dx) < dp(12) && abs(dy) < dp(12)) showChrome(!chromeVisible)
-                    }
-                }
-                return true
-            }
-            val ref = page.references.firstOrNull { it.id == selectedRef }
-            when (action) {
-                MotionEvent.ACTION_DOWN -> { dragX = e.x; dragY = e.y; return true }
-                MotionEvent.ACTION_POINTER_DOWN -> if (e.pointerCount >= 2 && ref != null) {
-                    pinchDistance = hypot(e.getX(0) - e.getX(1), e.getY(0) - e.getY(1)).coerceAtLeast(1f)
-                    pinchWidth = ref.width; pinchHeight = ref.height
-                }
-                MotionEvent.ACTION_MOVE -> if (ref != null) {
-                    if (e.pointerCount >= 2 && pinchDistance > 0) {
-                        val scale = hypot(e.getX(0) - e.getX(1), e.getY(0) - e.getY(1)) / pinchDistance
-                        changeReference(ref.copy(width = (pinchWidth * scale).coerceIn(0.05f, 2f), height = (pinchHeight * scale).coerceIn(0.05f, 3f)), persist = false)
-                    } else {
-                        changeReference(ref.copy(x = ref.x + (e.x - dragX) / paperRect.width(),
-                            y = ref.y + (e.y - dragY) / paperRect.width()), persist = false)
-                        dragX = e.x; dragY = e.y
-                    }
-                }
-                MotionEvent.ACTION_POINTER_UP -> { page.references.firstOrNull { it.id == selectedRef }?.let(store::updateReference); pinchDistance = 0f; dragX = e.x; dragY = e.y }
-                MotionEvent.ACTION_UP -> {
-                    page.references.firstOrNull { it.id == selectedRef }?.let(store::updateReference)
-                    val x = (e.x - paperRect.left) / paperRect.width(); val y = (e.y - paperRect.top) / paperRect.width()
-                    val selected = page.references.lastOrNull { x in it.x..(it.x + it.width) && y in it.y..(it.y + it.height) }
-                    if (selected != null) { selectedRef = selected.id; invalidate() }
-                }
-                MotionEvent.ACTION_CANCEL -> page.references.firstOrNull { it.id == selectedRef }?.let(store::updateReference)
-            }
-            return true
-        }
-
-        private fun addPenPoint(x: Float, y: Float, pressure: Float) {
-            if (!paperRect.contains(x, y)) return
-            if ((liveCount + 1) * 3 > live.size) live = live.copyOf(live.size * 2)
-            val j = liveCount * 3
-            live[j] = x; live[j + 1] = y; live[j + 2] = pressure.coerceIn(0.05f, 1f)
-            liveCount++
-        }
-    }
-
-    companion object {
-        const val EXTRA_BOOK = "sketchbook_id"
-        private const val PICK_REFERENCE = 702
-        fun intent(activity: Activity, id: Long) = Intent(activity, SketchActivity::class.java).putExtra(EXTRA_BOOK, id)
+    private fun prepareImport(uri:Uri){io({SketchImportSession.prepare(this,store,uri,contentResolver.getType(uri))}){session->pendingImport=session;SketchImportPanel(this,session){pendingImport=null}.show()}}
+    private fun receiveExcerpt(){val path=intent.getStringExtra("excerpt_path");val text=intent.getStringExtra("excerpt_text");if(path==null && text==null)return
+        io({SketchImportSession.excerpt(this,store,path,text,intent.getLongExtra("source_book",-1),intent.getStringExtra("source_location").orEmpty(),intent.getStringExtra("source_label").orEmpty())}){session->pendingImport=session;SketchImportPanel(this,session){pendingImport=null}.show()}}
+    companion object { private const val EXTRA_BOOK="sketchbook";private const val IMPORT=51;private const val EXPORT=52;private const val RESTORE=53
+        fun intent(context:android.content.Context,id:Long)=Intent(context,SketchActivity::class.java).putExtra(EXTRA_BOOK,id)
     }
 }

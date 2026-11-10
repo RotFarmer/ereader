@@ -183,7 +183,12 @@ class PenToolbar(ctx: Context, private val c: UiColors, private val settings: Se
     private fun sample(t: Int): PenSample {
         val s = PenSample(context, t, if (t == Tools.ERASER) c.fg else settings.toolColor(t), settings.toolWidth(t), c, settings.pressure)
         s.layoutParams = LayoutParams(dp(46), dp(40))
-        s.maxWidthDp = if (t == Tools.HIGHLIGHTER) 10f else 5f
+        s.maxWidthDp = when (t) {
+            Tools.HIGHLIGHTER -> 10f
+            Tools.BRUSH -> 7f
+            Tools.SOFT_BRUSH -> 9f
+            else -> 5f
+        }
         s.selected2 = t == settings.tool
         s.contentDescription = Tools.name(t)
         s.setOnClickListener {

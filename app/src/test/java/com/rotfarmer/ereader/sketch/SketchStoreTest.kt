@@ -70,7 +70,10 @@ class SketchStoreTest {
         assertEquals(0.25f, store.page(id, 4).references.single().x, 0.001f)
         assertEquals(0.4f, store.page(id, 4).references.single().opacity, 0.001f)
         store.delete(id)
-        assertFalse(java.io.File(store.referencesDir, ref.path).exists())
+        assertTrue(java.io.File(store.referencesDir, ref.path).exists())
+        assertEquals(null, store.get(id))
+        store.restore(id)
+        assertEquals(ref.path, store.page(id, 4).references.single().path)
         source.delete()
         store.close()
     }

@@ -220,6 +220,12 @@ class InkPainter {
                 grain.setLocalMatrix(grainMatrix)
                 shader = grain
             }
+            Tools.SOFT_BRUSH -> fill.apply {
+                blendMode = null
+                shader = null
+                val a = (Color.alpha(col) * 0.4f).toInt().coerceAtMost(110)
+                this.color = (col and 0x00FFFFFF) or (a shl 24)
+            }
             else -> fill.apply {
                 blendMode = null
                 shader = null
