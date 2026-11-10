@@ -13,6 +13,19 @@ import java.util.zip.*
 
 @RunWith(RobolectricTestRunner::class)
 class SketchEditingTest {
+    @Test fun normalizedPaperBorderStaysOnePixelWide() {
+        var borderWidth = 0f
+        val canvas = object : android.graphics.Canvas() {
+            override fun drawRect(rect: android.graphics.RectF, paint: android.graphics.Paint) {
+                if (paint.style == android.graphics.Paint.Style.STROKE) borderWidth = paint.strokeWidth
+            }
+        }
+        val pixelsPerUnit = 1000f
+        SketchPaper.draw(canvas, android.graphics.RectF(0f, 0f, 1f, SketchGeometry.HEIGHT),
+            0, 1f / pixelsPerUnit, dark = true)
+        assertEquals(1f, borderWidth * pixelsPerUnit, 0.01f)
+    }
+
     private fun stroke()=InkStroke(SketchIds.next(),1,Anchor(Anchor.PDF,0,0),Tools.PEN,0xff112233.toInt(),.002f,floatArrayOf(0f,.5f,.2f,1f,.5f,.8f),123)
     @Test fun partialEraserCutsSparseSegmentsAndKeepsPressure(){val s=stroke();val pieces=SketchGeometry.erase(s,.5f,.5f,.1f)
         assertEquals(2,pieces.size);assertEquals(0f,pieces[0].pts[0],.0001f);assertEquals(1f,pieces[1].pts[pieces[1].pts.size-3],.0001f)

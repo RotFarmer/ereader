@@ -15,7 +15,8 @@ object SketchPaper {
         canvas.drawRect(rect, paint)
         val step = rect.width() / 24f * spacing.coerceIn(0.5f, 3f)
         paint.color = if (dark) 0xFF3B4141.toInt() else 0xFFD8DFDF.toInt()
-        paint.strokeWidth = (0.8f * density).coerceAtLeast(0.5f)
+        // Density is expressed in the canvas's units, including normalized paper coordinates.
+        paint.strokeWidth = 0.8f * density
         paint.style = Paint.Style.STROKE
         if (style == 1 || style == 2) {
             var y = rect.top + step
@@ -30,13 +31,13 @@ object SketchPaper {
             var x = rect.left + step
             while (x < rect.right) {
                 var y = rect.top + step
-                while (y < rect.bottom) { canvas.drawCircle(x, y, (0.8f * density).coerceAtLeast(0.5f), paint); y += step }
+                while (y < rect.bottom) { canvas.drawCircle(x, y, 0.8f * density, paint); y += step }
                 x += step
             }
         }
         paint.style = Paint.Style.STROKE
         paint.color = if (dark) 0xFF555A58.toInt() else 0xFFBFC5C0.toInt()
-        paint.strokeWidth = (1f * density).coerceAtLeast(0.5f)
+        paint.strokeWidth = density
         canvas.drawRect(rect, paint)
     }
 }
