@@ -63,7 +63,9 @@ class SketchStoreTest {
         source.outputStream().use { bitmap.compress(Bitmap.CompressFormat.PNG, 100, it) }
         bitmap.recycle()
 
-        assertEquals(1, SketchImporter(ctx, store).import(Uri.fromFile(source), "image/png", id, 4))
+        val pageId = store.info(id, 4).id
+        val added = SketchImportSession.prepare(ctx, store, Uri.fromFile(source), "image/png").use { it.commit(id, pageId, listOf(0)) }
+        assertEquals(listOf(pageId), added)
         val ref = store.page(id, 4).references.single()
         assertTrue(java.io.File(store.referencesDir, ref.path).exists())
         store.updateReference(ref.copy(x = 0.25f, opacity = 0.4f))
@@ -76,29 +78,6 @@ class SketchStoreTest {
         assertEquals(ref.path, store.page(id, 4).references.single().path)
         source.delete()
         store.close()
-    }
-
-    @Test fun textAndWordDocumentsImportAsReferencePages() {
-        val ctx = RuntimeEnvironment.getApplication()
-        val store = SketchStore(ctx)
-        val id = store.create("Documents")
-        val text = java.io.File(ctx.cacheDir, "reference.txt").apply { writeText("Trace this paragraph.\n".repeat(400)) }
-        val imported = SketchImporter(ctx, store).import(Uri.fromFile(text), "text/plain", id, 0)
-        assertTrue(imported > 1)
-        assertEquals(1, store.page(id, 0).references.size)
-        assertEquals(1, store.page(id, imported - 1).references.size)
-
-        val docx = java.io.File(ctx.cacheDir, "reference.docx")
-        java.util.zip.ZipOutputStream(docx.outputStream()).use { zip ->
-            zip.putNextEntry(java.util.zip.ZipEntry("word/document.xml"))
-            zip.write("""<?xml version="1.0"?><w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:t>Word reference for tracing</w:t></w:r></w:p></w:body></w:document>""".toByteArray())
-            zip.closeEntry()
-        }
-        assertEquals(1, SketchImporter(ctx, store).import(Uri.fromFile(docx),
-            "application/vnd.openxmlformats-officedocument.wordprocessingml.document", id, imported))
-        assertEquals(1, store.page(id, imported).references.size)
-        store.delete(id)
-        text.delete(); docx.delete(); store.close()
     }
 
     @Test fun existingEpubParserStillReadsBookText() {

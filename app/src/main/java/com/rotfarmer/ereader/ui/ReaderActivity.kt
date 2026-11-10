@@ -998,7 +998,7 @@ class ReaderActivity : Activity(), ReaderView.Listener, PenToolbar.Callbacks {
     }
 
     private fun buildToolbar() {
-        toolbar?.let { root.removeView(it) }
+        toolbar?.let { root.removeView(it.parent as? View ?: it) }
         toolbar = null
         if (!settings.toolbarVisible) return
         val tb = PenToolbar(this, ui, settings, this)
@@ -1006,7 +1006,7 @@ class ReaderActivity : Activity(), ReaderView.Listener, PenToolbar.Callbacks {
             Gravity.CENTER_VERTICAL or if (settings.toolbarRight) Gravity.END else Gravity.START)
         lp.marginStart = dp(6); lp.marginEnd = dp(6)
         val idx = topBar?.let { root.indexOfChild(chromeScrim) } ?: root.childCount
-        root.addView(tb, idx.coerceAtMost(root.childCount), lp)
+        root.addView(tb.scrollable(), idx.coerceAtMost(root.childCount), lp)
         tb.insertArmed = view.armedInsert
         toolbar = tb
         updateUndo()
@@ -1521,7 +1521,7 @@ class ReaderActivity : Activity(), ReaderView.Listener, PenToolbar.Callbacks {
         scope.launch {
             try {
                 val file=withContext(Dispatchers.IO) {
-                    val f=File(app.excerptsDir,"sketch-${Ids.next()}.png")
+                    val f=File(com.rotfarmer.ereader.sketch.SketchLinks.tempDir(this@ReaderActivity),"sketch-${Ids.next()}.png")
                     val bitmap=pdf.renderRegion(page,region,1600)
                     try { f.outputStream().use { check(bitmap.compress(android.graphics.Bitmap.CompressFormat.PNG,100,it)) } }finally{bitmap.recycle()};f
                 }

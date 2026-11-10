@@ -78,15 +78,17 @@ class LibraryActivity : Activity() {
     private var status: TextView? = null
     private var books: List<Book> = emptyList()
     private var excerpts: List<Excerpt> = emptyList()
-    private val sketches by lazy { SketchStore(this) }
+    private val sketches by lazy { SketchStore.of(this) }
     private var sketchbooks: List<Sketchbook> = emptyList()
     private var libraryItems: List<LibraryItem> = emptyList()
     private var visibleItems: List<LibraryItem> = emptyList()
     private var searchQuery = ""
     private var formatFilter = LibraryFilter.All
-    private val sketchPreviews = object : LruCache<String, Bitmap>(8 * 1024 * 1024) {
+    /** Must hold more previews than fit on screen, or showing one would evict another forever. */
+    private val sketchPreviews = object : LruCache<String, Bitmap>((Runtime.getRuntime().maxMemory() / 16).toInt().coerceAtLeast(16 shl 20)) {
         override fun sizeOf(key: String, value: Bitmap) = value.allocationByteCount
     }
+    private var grid: GridView? = null
     private val previewJobs = HashMap<String, Job>()
     private var previewGeneration = 0
     private var sortMode = 0
@@ -94,10 +96,6 @@ class LibraryActivity : Activity() {
     private val excerptAdapter = ExcerptAdapter()
 
     private val covers = object : LruCache<String, Bitmap>((Runtime.getRuntime().maxMemory() / 10).toInt()) {
-        override fun sizeOf(key: String, value: Bitmap) = value.byteCount
-    }
-    /** Reference pictures used by sketchbook previews; bounded like the cover cache. */
-    private val refBitmaps = object : LruCache<String, Bitmap>((Runtime.getRuntime().maxMemory() / 20).toInt()) {
         override fun sizeOf(key: String, value: Bitmap) = value.byteCount
     }
     private val coverExec = Executors.newFixedThreadPool(2)
@@ -315,6 +313,7 @@ class LibraryActivity : Activity() {
     }
 
     private fun libraryGrid(): GridView = GridView(this).apply {
+        grid = this
         numColumns = GridView.AUTO_FIT
         columnWidth = dp(150)
         stretchMode = GridView.STRETCH_COLUMN_WIDTH
@@ -365,8 +364,7 @@ class LibraryActivity : Activity() {
         dialog(this, settings.dark).setTitle("New sketchbook · 350 pages").setView(input)
             .setNegativeButton("Cancel", null).setPositiveButton("Create") { _, _ ->
                 val title = input.text.toString().trim().ifEmpty { "Untitled sketchbook" }
-                scope.launch {
-                    val id = withContext(Db.io) { sketches.create(title) }
+                sketchAction({ sketches.create(title) }) { id ->
                     reload()
                     startActivity(SketchActivity.intent(this@LibraryActivity, id))
                 }
@@ -386,18 +384,39 @@ class LibraryActivity : Activity() {
                         dialog(this, settings.dark).setTitle("Rename sketchbook").setView(input)
                             .setNegativeButton("Cancel", null).setPositiveButton("Save") { _, _ ->
                                 val name = input.text.toString().trim()
-                                if (name.isNotEmpty()) scope.launch { withContext(Db.io) { sketches.rename(sketch.id, name) }; reload() }
+                                if (name.isNotEmpty()) sketchAction({ sketches.rename(sketch.id, name) }) { reload() }
                             }.show()
                     }
-                    2 -> scope.launch { withContext(Db.io) { sketches.delete(sketch.id) };reload();Toast.makeText(this@LibraryActivity,"Moved to Trash for 30 days",Toast.LENGTH_LONG).show() }
-                    3 -> scope.launch { withContext(Db.io) { sketches.duplicate(sketch.id) };reload() }
+                    2 -> sketchAction({ sketches.delete(sketch.id) }) { reload(); Toast.makeText(this@LibraryActivity, "Moved to Trash for 30 days", Toast.LENGTH_LONG).show() }
+                    3 -> sketchAction({ sketches.duplicate(sketch.id) }) { reload() }
                 }
             }.show()
     }
 
-    private fun sketchTrash(){scope.launch { val items=withContext(Db.io){sketches.trash()};if(items.isEmpty())Toast.makeText(this@LibraryActivity,"Trash is empty",Toast.LENGTH_SHORT).show()
-        else dialog(this@LibraryActivity,settings.dark).setTitle("Restore sketchbook").setItems(items.map { it.title }.toTypedArray()){_,index->scope.launch { withContext(Db.io){sketches.restore(items[index].id)};reload() }}.show()
-    }}
+    private fun sketchTrash() {
+        sketchAction({ sketches.trash() }) { items ->
+            if (items.isEmpty()) Toast.makeText(this, "Trash is empty", Toast.LENGTH_SHORT).show()
+            else dialog(this, settings.dark).setTitle("Restore sketchbook").setItems(items.map { it.title }.toTypedArray()) { _, index ->
+                sketchAction({ sketches.restore(items[index].id) }) { reload() }
+            }.show()
+        }
+    }
+
+    /**
+     * Runs a sketchbook database call off the main thread. A failure shows a message instead of
+     * crashing the library, which is also the only way into the user's books.
+     */
+    private fun <T> sketchAction(work: () -> T, done: (T) -> Unit) {
+        scope.launch {
+            val result = try { withContext(Dispatchers.IO) { work() } }
+            catch (e: CancellationException) { throw e }
+            catch (e: Exception) {
+                Toast.makeText(this@LibraryActivity, e.message ?: "Sketchbook storage isn't available", Toast.LENGTH_LONG).show()
+                return@launch
+            }
+            done(result)
+        }
+    }
 
     private fun emptyView(title: String, body: String, actions: Boolean = true): View = LinearLayout(this).apply {
         orientation = LinearLayout.VERTICAL
@@ -428,11 +447,14 @@ class LibraryActivity : Activity() {
 
     private fun reload() {
         scope.launch {
-            if(System.currentTimeMillis()-settings.prefs.getLong("sketchCleanup",0)>24*3600_000L) {
-                withContext(Db.io){sketches.purgeExpired()}
-                settings.prefs.edit().putLong("sketchCleanup",System.currentTimeMillis()).apply()
+            val (b, e) = withContext(Db.io) { app.db.books() to app.db.allExcerpts() }
+            // Sketchbooks live in their own database; a problem there must never hide the books.
+            val loaded = withContext(Dispatchers.IO) { runCatching { sketches.list() } }
+            loaded.exceptionOrNull()?.let { x ->
+                if (!sketchErrorShown) Toast.makeText(this@LibraryActivity, "Sketchbooks couldn't be loaded: ${x.message ?: "storage error"}", Toast.LENGTH_LONG).show()
+                sketchErrorShown = true
             }
-            val (b, e, s) = withContext(Db.io) { Triple(app.db.books(), app.db.allExcerpts(), sketches.list()) }
+            val s = loaded.getOrDefault(emptyList())
             clearPreviewJobs()
             books = b
             excerpts = e
@@ -441,7 +463,18 @@ class LibraryActivity : Activity() {
             libraryAdapter.notifyDataSetChanged()
             excerptAdapter.notifyDataSetChanged()
             checkCovers()
+            purgeSketchTrash()
         }
+    }
+
+    private var sketchErrorShown = false
+
+    /** Once a day, after the library is showing: empty the sketchbook Trash of items older than 30 days. */
+    private fun purgeSketchTrash() {
+        val now = System.currentTimeMillis()
+        if (now - settings.prefs.getLong("sketchCleanup", 0) < 24 * 3600_000L) return
+        settings.prefs.edit().putLong("sketchCleanup", now).apply()
+        scope.launch(Dispatchers.IO) { runCatching { sketches.purgeExpired(now) } }
     }
 
     // ------------------------------------------------------------------ sketch previews
@@ -458,7 +491,15 @@ class LibraryActivity : Activity() {
                     SketchRenderer.thumbnail(sketches.referencesDir, sketches.page(sketch.id, sketch.currentPage), 320, settings.dark)
                 }
                 if (generation != previewGeneration || isFinishing || isDestroyed) bitmap.recycle()
-                else { sketchPreviews.put(key, bitmap); libraryAdapter.notifyDataSetChanged() }
+                else {
+                    sketchPreviews.put(key, bitmap)
+                    // Update just the visible card: rebinding the whole grid could request
+                    // previews that were evicted, and so on in a loop.
+                    grid?.let { g -> for (i in 0 until g.childCount) {
+                        val cell = g.getChildAt(i) as? LinearLayout ?: continue
+                        if (cell.tag == key) (cell.getChildAt(0) as? SketchCoverView)?.preview = bitmap
+                    } }
+                }
             } catch (e: CancellationException) { throw e }
             catch (e: Exception) { /* A missing preview must not prevent opening the sketchbook. */ }
             finally { if (previewJobs[key] === coroutineContext[Job]) previewJobs.remove(key) }
@@ -696,7 +737,7 @@ class LibraryActivity : Activity() {
         if(requestCode==44 && resultCode==RESULT_OK) {
             val uri=data?.data ?: return
             scope.launch { try {
-                val id=withContext(Db.io){contentResolver.openInputStream(uri)?.use { com.rotfarmer.ereader.sketch.SketchArchive.restore(sketches,it) } ?: error("Could not open backup")}
+                val id=withContext(Dispatchers.IO){contentResolver.openInputStream(uri)?.use { com.rotfarmer.ereader.sketch.SketchArchive.restore(sketches,it) } ?: error("Could not open backup")}
                 reload();startActivity(SketchActivity.intent(this@LibraryActivity,id))
             }catch(e:Exception){Toast.makeText(this@LibraryActivity,e.message ?: "Restore failed",Toast.LENGTH_LONG).show()} };return
         }
@@ -990,6 +1031,7 @@ class LibraryActivity : Activity() {
     }
 
     private fun bindSketchCell(cell: LinearLayout, item: LibraryItem.SketchbookItem) {
+        cell.tag = item.key
         (cell.getChildAt(0) as SketchCoverView).preview = sketchPreviews.get(item.key)
         requestPreview(item)
         (cell.getChildAt(1) as ProgressLine).apply { progress = (item.sketchbook.currentPage + 1f) / item.sketchbook.pageCount; invalidate() }

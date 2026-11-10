@@ -21,7 +21,7 @@ class SketchActivity:Activity(),PenToolbar.Callbacks {
     private val app by lazy { App.of(this) }
     internal val settings get()=app.settings
     internal val colors get()=UiColors(settings.dark)
-    internal val store by lazy { SketchStore(this) }
+    internal val store by lazy { SketchStore.of(this) }
     internal val scope=CoroutineScope(SupervisorJob()+Dispatchers.Main)
     internal var bookId=-1L;private set
     internal var book:Sketchbook?=null;private set
@@ -39,6 +39,7 @@ class SketchActivity:Activity(),PenToolbar.Callbacks {
     private lateinit var tools:TextButton
     private lateinit var reveal:TextButton
     private var toolbar:PenToolbar?=null
+    private var toolbarHolder:View?=null
     private var dock:LinearLayout?=null
     private var dockKey=""
     private var dockRefId=-1L
@@ -49,23 +50,38 @@ class SketchActivity:Activity(),PenToolbar.Callbacks {
     private var exportIds=emptyList<Long>()
     private var exportDark=false
     private var pendingImport:SketchImportSession?=null
+    /** True until the excerpt this window was opened with has been offered for import. */
     private var initial=true
+    private val writerListener:(String)->Unit={ state -> status.text=state;if(!writer.busy)refreshHistory() }
 
     override fun onCreate(savedInstanceState:Bundle?) {
         super.onCreate(savedInstanceState);bookId=intent.getLongExtra(EXTRA_BOOK,-1)
+        savedInstanceState?.let { st ->
+            initial=st.getBoolean("initial",true);focus=st.getBoolean("focus",false)
+            exportKind=st.getString("exportKind") ?: "pdf";exportIds=st.getLongArray("exportIds")?.toList().orEmpty();exportDark=st.getBoolean("exportDark",false)
+        }
         writer=SketchWriter.get(this,bookId);build()
-        writer.listener={ state -> status.text=state;if(!writer.busy)refreshHistory() }
+        writer.addListener(writerListener)
         status.text=writer.state
-        io({val b=store.get(bookId) ?: error("Sketchbook missing");Triple(b,store.info(bookId,b.currentPage),store.page(bookId,b.currentPage))}) {
+        io({val b=store.get(bookId) ?: error("This sketchbook is no longer in the library");Triple(b,store.info(bookId,b.currentPage),store.page(bookId,b.currentPage))},failed={finish()}) {
             book=it.first;show(it.second,it.third)
             if(initial){initial=false;receiveExcerpt()}
         }
     }
-    override fun onDestroy(){writer.listener=null;scope.cancel();if(::canvas.isInitialized)canvas.dispose();pendingImport?.close();super.onDestroy()}
-    override fun onConfigurationChanged(newConfig:Configuration){super.onConfigurationChanged(newConfig);build();info?.let { canvas.setPage(page,it) };refreshHistory()}
-    @Deprecated("Activity back callback") override fun onBackPressed(){writer.afterSaved { finish() };if(writer.error!=null)toast("Tap the save message to retry before leaving.")}
+    override fun onSaveInstanceState(out:Bundle) {
+        super.onSaveInstanceState(out)
+        out.putBoolean("initial",initial);out.putBoolean("focus",focus)
+        out.putString("exportKind",exportKind);out.putLongArray("exportIds",exportIds.toLongArray());out.putBoolean("exportDark",exportDark)
+    }
+    /** Another window (the reader, or this sketchbook opened again) may have changed the page meanwhile. */
+    override fun onRestart(){super.onRestart();refreshFromStore()}
+    override fun onDestroy(){writer.removeListener(writerListener);scope.cancel();if(::canvas.isInitialized)canvas.dispose();pendingImport?.close();super.onDestroy()}
+    override fun onConfigurationChanged(newConfig:Configuration){super.onConfigurationChanged(newConfig);build();refreshHistory()}
+    @Deprecated("Activity back callback") override fun onBackPressed() {
+        if(writer.error!=null){toast("Your last change couldn't be saved yet. It will keep retrying.");finish();return}
+        writer.afterSaved { if(!isDestroyed)finish() }
+    }
     private fun build() {
-        if(::canvas.isInitialized)canvas.dispose()
         dock=null;dockKey=""
         val ui=colors
         root=LinearLayout(this).apply { orientation=LinearLayout.VERTICAL;setBackgroundColor(ui.bg)
@@ -83,12 +99,17 @@ class SketchActivity:Activity(),PenToolbar.Callbacks {
         root.addView(View(this).apply { setBackgroundColor(ui.line) },LinearLayout.LayoutParams(-1,dp(1)))
         workspace=LinearLayout(this).apply { orientation=if(resources.configuration.orientation==Configuration.ORIENTATION_LANDSCAPE)LinearLayout.HORIZONTAL else LinearLayout.VERTICAL }
         frame=FrameLayout(this)
-        canvas=SketchCanvas(this,settings,store.referencesDir,{before,after -> edit(before,after)},{z,x,y,r ->
-            info=info?.copy(zoom=z,panX=x,panY=y,rotation=r);info?.let { writer.viewport(it) }
-        })
+        // The canvas survives rotation and layout rebuilds, keeping its tool, selection and clipboard.
+        if(!::canvas.isInitialized) {
+            canvas=SketchCanvas(this,settings,store.referencesDir,{before,after -> edit(before,after)},{z,x,y,r ->
+                info=info?.copy(zoom=z,panX=x,panY=y,rotation=r);info?.let { writer.viewport(it) }
+            })
+            canvas.onSwipe={ step -> navigate((info?.index ?: 0)+step) }
+        } else (canvas.parent as? ViewGroup)?.removeView(canvas)
         frame.addView(canvas,FrameLayout.LayoutParams(-1,-1))
-        toolbar=PenToolbar(this,ui,settings,this,showInsertSpace=false).apply { visibility=if(settings.toolbarVisible && !focus)View.VISIBLE else View.GONE }
-        frame.addView(toolbar,FrameLayout.LayoutParams(-2,-2,Gravity.CENTER_VERTICAL or if(settings.toolbarRight)Gravity.END else Gravity.START).apply { marginStart=dp(6);marginEnd=dp(6) })
+        toolbar=PenToolbar(this,ui,settings,this,showInsertSpace=false)
+        toolbarHolder=toolbar!!.scrollable().apply { visibility=if(settings.toolbarVisible && !focus)View.VISIBLE else View.GONE }
+        frame.addView(toolbarHolder,FrameLayout.LayoutParams(-2,-2,Gravity.CENTER_VERTICAL or if(settings.toolbarRight)Gravity.END else Gravity.START).apply { marginStart=dp(6);marginEnd=dp(6) })
         reveal=TextButton(this,"Show controls",ui).apply { visibility=if(focus)View.VISIBLE else View.GONE;setOnClickListener { focus=false;applyFocus() } }
         frame.addView(reveal,FrameLayout.LayoutParams(-2,dp(48),Gravity.TOP or Gravity.END))
         workspace.addView(frame,if(workspace.orientation==LinearLayout.HORIZONTAL)LinearLayout.LayoutParams(0,-1,1f) else LinearLayout.LayoutParams(-1,0,1f))
@@ -98,29 +119,57 @@ class SketchActivity:Activity(),PenToolbar.Callbacks {
         counter=label(this,"",ui,14f,bold=true).apply { gravity=Gravity.CENTER;minHeight=dp(48);contentDescription="Browse sketchbook pages";setOnClickListener { browse() } }
         nav.addView(counter,LinearLayout.LayoutParams(0,dp(48),1f))
         nav.addView(IconButton(this,Icons.CHEV_RIGHT,ui).apply { contentDescription="Next page";setOnClickListener { navigate((info?.index ?: 0)+1) } })
-        tools=TextButton(this,"Draw",ui).apply { setOnClickListener { if(canvas.referenceId!=null)finishArranging() else drawingTools() } };nav.addView(tools)
+        tools=TextButton(this,if(canvas.referenceId!=null)"Done" else canvas.mode,ui).apply { setOnClickListener { if(canvas.referenceId!=null)finishArranging() else drawingTools() } };nav.addView(tools)
         nav.addView(TextButton(this,"Fit",ui).apply { setOnClickListener { canvas.fit() } })
         nav.addView(TextButton(this,"Focus",ui).apply { setOnClickListener { focus=!focus;applyFocus() } })
         root.addView(nav,LinearLayout.LayoutParams(-1,dp(52)))
         setContentView(root);updateLabels();refreshDock();applyFocus()
     }
-    private fun applyFocus(){header.visibility=if(focus)View.GONE else View.VISIBLE;root.getChildAt(root.childCount-1).visibility=if(focus)View.GONE else View.VISIBLE;toolbar?.visibility=if(settings.toolbarVisible && !focus)View.VISIBLE else View.GONE;reveal.visibility=if(focus)View.VISIBLE else View.GONE}
+    private fun applyFocus(){header.visibility=if(focus)View.GONE else View.VISIBLE;root.getChildAt(root.childCount-1).visibility=if(focus)View.GONE else View.VISIBLE;toolbarHolder?.visibility=if(settings.toolbarVisible && !focus)View.VISIBLE else View.GONE;reveal.visibility=if(focus)View.VISIBLE else View.GONE}
     private fun updateLabels(){title.text=book?.title ?: "Sketchbook";counter.text=info?.let { "${it.index+1} / ${book?.pageCount ?: 350}" } ?: "Loading…"}
     internal fun toast(text:String){Toast.makeText(this,text,Toast.LENGTH_LONG).show()}
-    internal fun <T> io(work:()->T,done:(T)->Unit={}) {
-        if(loading)return
-        writer.afterSaved {
-            if(isDestroyed || loading)return@afterSaved
+    /** Storage work waiting for the one before it to finish. */
+    private val ioQueue=ArrayDeque<()->Unit>()
+    /**
+     * Runs [work] off the main thread once every queued save is on disk, then [done] on the main
+     * thread. Requests run one at a time, in order, and drawing is paused while one runs, so the
+     * page on screen never falls behind the stored page.
+     */
+    internal fun <T> io(work:()->T,failed:()->Unit={},done:(T)->Unit={}) {
+        val start:()->Unit={
             loading=true;canvas.enabledForInput=false
-            scope.launch { try { val result=withContext(Dispatchers.IO){work()};loading=false;canvas.enabledForInput=true;done(result) }
-                catch(e:CancellationException){throw e}
-                catch(e:Exception){toast(e.message ?: "Could not complete this action")}
-                finally { loading=false;canvas.enabledForInput=true } }
+            writer.afterSaved {
+                if(isDestroyed)return@afterSaved
+                scope.launch {
+                    val result=try { Result.success(withContext(Dispatchers.IO){work()}) }
+                        catch(e:CancellationException){ if(!isActive)throw e;Result.failure(e) }
+                        catch(e:Exception){Result.failure(e)}
+                    loading=false;canvas.enabledForInput=true
+                    result.onSuccess { done(it) }.onFailure { e ->
+                        toast(if(e is CancellationException)"Canceled" else e.message ?: "Could not complete this action");failed()
+                    }
+                    if(!loading)ioQueue.removeFirstOrNull()?.invoke()
+                }
+            }
         }
-        if(writer.error!=null)toast(writer.error ?: "Save failed")
+        if(loading)ioQueue.addLast(start) else start()
+        if(writer.error!=null)toast("Waiting for your last change to save…")
     }
     private fun show(p:PageInfo,content:SketchPage){info=p;page=content;canvas.setPage(content,p);updateLabels();refreshDock();refreshHistory()}
     internal fun reload(){val id=info?.id ?: return;io({Triple(store.get(bookId)!!,store.infoById(bookId,id),store.pageById(bookId,id))}){book=it.first;show(it.second,it.third)}}
+    /** Shows the stored page again without resetting the view, tool or reference being arranged. */
+    private fun refreshFromStore() {
+        val current=info ?: return
+        io({ val b=store.get(bookId) ?: error("This sketchbook is no longer in the library")
+            val p=runCatching { store.infoById(bookId,current.id) }.getOrNull()
+            if(p!=null)Triple(b,p,store.pageById(bookId,p.id)) else Triple(b,store.info(bookId,b.currentPage),store.page(bookId,b.currentPage)) },failed={finish()}) { (b,p,content)->
+            book=b
+            if(p.id==current.id) {
+                info=p.copy(zoom=current.zoom,panX=current.panX,panY=current.panY,rotation=current.rotation);page=content
+                canvas.setPage(content);updateLabels();refreshDock();refreshHistory()
+            } else show(p,content)
+        }
+    }
     internal fun navigate(index:Int){if(index !in 0 until (book?.pageCount ?: 0))return;io({store.setCurrentPage(bookId,index);Triple(store.get(bookId)!!,store.info(bookId,index),store.page(bookId,index))}){book=it.first;show(it.second,it.third)}}
     internal fun navigateId(id:Long){io({store.setCurrentId(bookId,id);Triple(store.get(bookId)!!,store.infoById(bookId,id),store.pageById(bookId,id))}){book=it.first;show(it.second,it.third)}}
     private fun edit(before:SketchPage,after:SketchPage){val id=info?.id ?: return;page=after;writer.enqueue(id,before,after);refreshDock()}
@@ -132,9 +181,9 @@ class SketchActivity:Activity(),PenToolbar.Callbacks {
     override fun onToolChanged(){canvas.mode="Draw";tools.text="Draw";canvas.invalidate()}
     override fun onToolOptions(anchor:View){sheet("Pen options",ToolOptions(this,colors,settings,settings.tool,{toolbar?.refresh();canvas.invalidate()},null))}
     override fun onInsertSpace(armed:Boolean){toolbar?.insertArmed=false}
-    override fun onSideChanged(){build();info?.let { canvas.setPage(page,it) }}
+    override fun onSideChanged(){build();refreshHistory()}
     override fun onExpandedChanged(){refreshHistory()}
-    override fun onHide(){settings.toolbarVisible=false;toolbar?.visibility=View.GONE}
+    override fun onHide(){settings.toolbarVisible=false;toolbarHolder?.visibility=View.GONE}
     internal fun column()=LinearLayout(this).apply { orientation=LinearLayout.VERTICAL;setPadding(dp(16),dp(8),dp(16),dp(8)) }
     internal fun button(text:String,action:()->Unit)=TextButton(this,text,colors).apply { minHeight=dp(48);setOnClickListener { action() } }
     internal fun sheet(title:String,body:View):android.app.AlertDialog = dialog(this,settings.dark).setTitle(title).setView(body).setPositiveButton("Done",null).show().also {
@@ -147,7 +196,11 @@ class SketchActivity:Activity(),PenToolbar.Callbacks {
         parent.addView(SeekBar(this).apply { this.max=100;progress=((value-min)/(max-min)*100).toInt().coerceIn(0,100)
             setOnSeekBarChangeListener(object:SeekBar.OnSeekBarChangeListener { override fun onStartTrackingTouch(s:SeekBar){};override fun onProgressChanged(s:SeekBar,p:Int,user:Boolean){text.text="$name · ${p}%"};override fun onStopTrackingTouch(s:SeekBar){changed(min+(max-min)*s.progress/100f)} }) }) }
     private fun options(){menu("Sketchbook",listOf("Paper","Page details","Add pages","Rename sketchbook","Export or backup","Restore backup","Trash","Pen and touch")){when(it){
-        0->paperOptions();1->info?.let { pageMenu(it) };2->input("Add pages","50",true){n->n.toIntOrNull()?.takeIf { it in 1..10000 }?.let { count->io({store.addPages(bookId,count);store.get(bookId)}){book=it;updateLabels()} }}
+        0->paperOptions();1->info?.let { pageMenu(it) };2->input("Add pages","50",true){n->
+            val room=SketchStore.MAX_PAGES-(book?.pageCount ?: 0);val count=n.toIntOrNull()
+            if(count==null || count<1)toast("Enter how many pages to add")
+            else if(count>room)toast(if(room<=0)"This sketchbook is full (${"%,d".format(SketchStore.MAX_PAGES)} pages)" else "You can add up to $room more pages")
+            else io({store.addPages(bookId,count);store.get(bookId)}){book=it;updateLabels();toast("Added $count pages at the end")} }
         3->input("Rename sketchbook",book?.title.orEmpty()){name->if(name.isNotBlank())io({store.rename(bookId,name);store.get(bookId)}){book=it;updateLabels()}}
         4->exportOptions();5->startActivityForResult(Intent(Intent.ACTION_OPEN_DOCUMENT).apply { type="application/zip";addCategory(Intent.CATEGORY_OPENABLE) },RESTORE)
         6->trash();7->touchOptions()
@@ -157,7 +210,7 @@ class SketchActivity:Activity(),PenToolbar.Callbacks {
     private fun touchOptions(){val body=column();body.addView(button(if(settings.fingerDraw)"Finger drawing: on" else "Finger drawing: off"){settings.fingerDraw=!settings.fingerDraw;toast(if(settings.fingerDraw)"Finger drawing on; use two fingers to navigate" else "S Pen draws; fingers navigate")})
         slider(body,"Pressure response",settings.pressure,0f,1f){settings.pressure=it;page.strokes.forEach { s->s.shape=null };canvas.invalidate()};body.addView(button("Move toolbar to ${if(settings.toolbarRight)"left" else "right"}"){settings.toolbarRight=!settings.toolbarRight;onSideChanged()});sheet("Pen and touch",body)}
     private fun drawingTools(){val modes=listOf("Draw","Lasso","Straightedge","Arrow","Rectangle","Ellipse","Copy selection","Paste","Duplicate selection","Delete selection","Eraser mode","Pen presets","Reset rotation","Show pen palette")
-        menu("Drawing tools",modes){i->when(i){in 0..5->{canvas.mode=modes[i];tools.text=modes[i]};6->canvas.copySelection();7->canvas.paste();8->canvas.duplicateSelection();9->canvas.deleteSelection();10->menu("Eraser",listOf("Whole stroke","Partial stroke")){canvas.partialEraser=it==1;settings.tool=Tools.ERASER;toolbar?.refresh()};11->presets();12->canvas.resetRotation();13->{settings.toolbarVisible=true;toolbar?.visibility=View.VISIBLE}}} }
+        menu("Drawing tools",modes){i->when(i){in 0..5->{canvas.mode=modes[i];tools.text=modes[i]};6->canvas.copySelection();7->canvas.paste();8->canvas.duplicateSelection();9->canvas.deleteSelection();10->menu("Eraser",listOf("Whole stroke","Partial stroke")){canvas.partialEraser=it==1;settings.tool=Tools.ERASER;toolbar?.refresh()};11->presets();12->canvas.resetRotation();13->{settings.toolbarVisible=true;toolbarHolder?.visibility=if(focus)View.GONE else View.VISIBLE}}} }
     private fun presets(){val data=runCatching { JSONArray(settings.prefs.getString("sketchPresets","[]")) }.getOrDefault(JSONArray());val names=(0 until data.length()).map { data.getJSONObject(it).getString("name") }+"Save current pen"
         menu("Pen presets",names){i->if(i==data.length())input("Preset name","Pen ${i+1}"){name->if(name.isNotBlank()){data.put(JSONObject().put("name",name).put("tool",settings.tool).put("color",settings.toolColor(settings.tool)).put("width",settings.toolWidth(settings.tool)));settings.prefs.edit().putString("sketchPresets",data.toString()).apply()}}
             else {val p=data.getJSONObject(i);settings.tool=p.getInt("tool");settings.setToolColor(settings.tool,p.getInt("color"));settings.setToolWidth(settings.tool,p.getDouble("width").toFloat());toolbar?.refresh();onToolChanged()} }
@@ -191,18 +244,35 @@ class SketchActivity:Activity(),PenToolbar.Callbacks {
         grip.setOnTouchListener { _,e->when(e.actionMasked){MotionEvent.ACTION_DOWN->{initialSize=if(landscape)panel.width else panel.height;initialTouch=if(landscape)e.rawX else e.rawY;true};MotionEvent.ACTION_MOVE->{val delta=(initialTouch-(if(landscape)e.rawX else e.rawY)).toInt();val cap=(if(landscape)workspace.width else workspace.height)*2/3;panel.layoutParams=panel.layoutParams.apply { if(landscape)width=(initialSize+delta).coerceIn(dp(180),cap.coerceAtLeast(dp(180))) else height=(initialSize+delta).coerceIn(dp(150),cap.coerceAtLeast(dp(150))) };true};else->true} }
         scope.launch { val bmp=withContext(Dispatchers.IO){runCatching { SketchRenderer.decode(store.referencesDir,ref,1600) }.getOrNull()};if(dock===panel && bmp!=null)view.display(bmp,ref,settings.dark) else bmp?.recycle() }
     }
-    private fun pickReference(){startActivityForResult(Intent(Intent.ACTION_OPEN_DOCUMENT).apply { addCategory(Intent.CATEGORY_OPENABLE);type="*/*";putExtra(Intent.EXTRA_MIME_TYPES,arrayOf("image/jpeg","image/png","image/webp","application/pdf","application/vnd.openxmlformats-officedocument.wordprocessingml.document","text/plain")) },IMPORT)}
-    private fun exportOptions(){io({store.pages(bookId)}){pages->menu("Export",listOf("Current page as PDF","Used pages as PDF","All pages as PDF","Current page as PNG","Editable backup")){choice->
-        exportKind=if(choice==4)"zip" else if(choice==3)"png" else "pdf";exportIds=when(choice){1->pages.filter { it.used }.map { it.id };2,4->pages.map { it.id };else->listOfNotNull(info?.id)}
-        if(exportIds.isEmpty()){toast("No used pages to export");return@menu}
-        if(exportKind=="zip")createExport() else menu("Export appearance",listOf("Light paper and original colors","Dark appearance")){exportDark=it==1;createExport()}
+    private fun pickReference(){startActivityForResult(Intent(Intent.ACTION_OPEN_DOCUMENT).apply { addCategory(Intent.CATEGORY_OPENABLE);type="*/*";putExtra(Intent.EXTRA_MIME_TYPES,arrayOf("image/jpeg","image/png","image/webp","application/pdf","application/vnd.openxmlformats-officedocument.wordprocessingml.document","application/epub+zip","application/x-mobipocket-ebook","application/octet-stream","text/plain")) },IMPORT)}
+    private fun exportOptions(){io({store.pages(bookId)}){pages->menu("Export",listOf("Current page as PDF","Used pages as PDF","All pages as PDF","Choose pages as PDF…","Current page as PNG","Editable backup")){choice->
+        fun go(){
+            if(exportIds.isEmpty()){toast("No used pages to export");return}
+            if(exportKind=="zip")createExport() else menu("Export appearance",listOf("Light paper and original colors","Dark appearance")){exportDark=it==1;createExport()}
+        }
+        exportKind=when(choice){5->"zip";4->"png";else->"pdf"}
+        if(choice==3) input("Pages to export, e.g. 1-5, 8","${(info?.index ?: 0)+1}") { value ->
+            val picked=runCatching { SketchImportPanel.parse(value,pages.size) }.getOrElse { toast(it.message ?: "Use pages such as 1-5, 8");return@input }
+            exportIds=picked.map { pages[it].id };go()
+        } else { exportIds=when(choice){1->pages.filter { it.used }.map { it.id };2,5->pages.map { it.id };else->listOfNotNull(info?.id)};go() }
     }}}
     private fun createExport(){startActivityForResult(Intent(Intent.ACTION_CREATE_DOCUMENT).apply { addCategory(Intent.CATEGORY_OPENABLE);type=when(exportKind){"zip"->"application/zip";"png"->"image/png";else->"application/pdf"};putExtra(Intent.EXTRA_TITLE,"${book?.title ?: "Sketchbook"}.$exportKind") },EXPORT)}
     @Deprecated("Platform activity result API") override fun onActivityResult(requestCode:Int,resultCode:Int,data:Intent?){super.onActivityResult(requestCode,resultCode,data);if(resultCode!=RESULT_OK)return;val uri=data?.data ?: return
         when(requestCode){IMPORT->prepareImport(uri);EXPORT->io({contentResolver.openOutputStream(uri,"wt")?.use { out->when(exportKind){"zip"->SketchArchive.write(store,bookId,out);"png"->SketchExport.png(store,bookId,exportIds.single(),out,exportDark);else->SketchExport.pdf(store,bookId,exportIds,out,exportDark)} } ?: error("Could not write the selected file")}){toast("Export saved")}
             RESTORE->io({contentResolver.openInputStream(uri)?.use { SketchArchive.restore(store,it) } ?: error("Could not open backup")}){startActivity(intent(this,it));finish()}}
     }
-    private fun prepareImport(uri:Uri){io({SketchImportSession.prepare(this,store,uri,contentResolver.getType(uri))}){session->pendingImport=session;SketchImportPanel(this,session){pendingImport=null}.show()}}
+    private fun prepareImport(uri:Uri) {
+        // Converting a long book or document into pages can take a while: show progress and allow cancel.
+        @Suppress("DEPRECATION") val progress=android.app.ProgressDialog(this).apply { setTitle("Preparing import");setMessage("Reading the file…");setCancelable(false) }
+        val cancelled=java.util.concurrent.atomic.AtomicBoolean(false)
+        @Suppress("DEPRECATION") progress.setButton(android.app.AlertDialog.BUTTON_NEGATIVE,"Cancel"){_,_->cancelled.set(true)}
+        progress.show()
+        io({ try { SketchImportSession.prepare(this,store,uri,contentResolver.getType(uri),{cancelled.get()}){msg->runOnUiThread { if(progress.isShowing)progress.setMessage(msg) }} }
+             finally { runOnUiThread { if(progress.isShowing)progress.dismiss() } } }) { session->
+            if(isDestroyed){session.close();return@io}
+            pendingImport=session;SketchImportPanel(this,session){pendingImport=null}.show()
+        }
+    }
     private fun receiveExcerpt(){val path=intent.getStringExtra("excerpt_path");val text=intent.getStringExtra("excerpt_text");if(path==null && text==null)return
         io({SketchImportSession.excerpt(this,store,path,text,intent.getLongExtra("source_book",-1),intent.getStringExtra("source_location").orEmpty(),intent.getStringExtra("source_label").orEmpty())}){session->pendingImport=session;SketchImportPanel(this,session){pendingImport=null}.show()}}
     companion object { private const val EXTRA_BOOK="sketchbook";private const val IMPORT=51;private const val EXPORT=52;private const val RESTORE=53

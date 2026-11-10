@@ -14,6 +14,26 @@ import java.io.File
 /** Content uses immutable slots; stable page identities and display order are independent. */
 class SketchStore(private val context: Context) : SQLiteOpenHelper(context, "sketchbooks.db", null, 2), java.io.Closeable {
     val referencesDir = File(context.filesDir, "sketch-references").apply { mkdirs() }
+
+    init {
+        // Readers (library, thumbnails) keep working while a long import or restore is writing.
+        setWriteAheadLoggingEnabled(true)
+    }
+
+    companion object {
+        /** Most sketchbooks a single book may hold, matching what backups can restore. */
+        const val MAX_PAGES = 10000
+
+        @Volatile private var shared: SketchStore? = null
+
+        /**
+         * The app's one connection to the sketchbook database. Separate helpers on the same file
+         * can fail with "database is locked" while another one is in a long transaction.
+         */
+        fun of(context: Context): SketchStore = shared ?: synchronized(this) {
+            shared ?: SketchStore(context.applicationContext).also { shared = it }
+        }
+    }
     override fun onCreate(db: SQLiteDatabase) {
         db.execSQL("CREATE TABLE sketchbooks(id INTEGER PRIMARY KEY,title TEXT NOT NULL,page_count INTEGER NOT NULL,current_page INTEGER NOT NULL DEFAULT 0,updated INTEGER NOT NULL)")
         db.execSQL("CREATE TABLE sketch_pages(book INTEGER NOT NULL,page INTEGER NOT NULL,paper INTEGER NOT NULL,PRIMARY KEY(book,page))")
@@ -77,7 +97,8 @@ class SketchStore(private val context: Context) : SQLiteOpenHelper(context, "ske
         writableDatabase.update("sketchbooks", ContentValues().apply { put("default_paper", paper); put("default_spacing", spacing) }, "id=?", arrayOf("$id")) }
     fun addPages(id: Long, count: Int) { insertPages(id, get(id)?.pageCount ?: error("Sketchbook missing"), count) }
     fun insertPages(book: Long, at: Int, count: Int): List<Long> = transaction {
-        val b = get(book) ?: error("Sketchbook missing"); require(count in 1..10000 && at in 0..b.pageCount)
+        val b = get(book) ?: error("Sketchbook missing"); require(count in 1..MAX_PAGES && at in 0..b.pageCount)
+        require(b.pageCount + count <= MAX_PAGES) { "A sketchbook can hold up to ${"%,d".format(MAX_PAGES)} pages" }
         val slot = readableDatabase.rawQuery("SELECT COALESCE(MAX(slot),-1)+1 FROM sketch_order WHERE book=?", arrayOf("$book")).use { it.moveToFirst(); it.getInt(0) }
         writableDatabase.execSQL("UPDATE sketch_order SET position=position+? WHERE book=? AND deleted=0 AND position>=?", arrayOf(count, book, at))
         val ids = (0 until count).map { i -> insertOrder(writableDatabase, book, at+i, slot+i).also {
@@ -166,20 +187,43 @@ class SketchStore(private val context: Context) : SQLiteOpenHelper(context, "ske
         writableDatabase.insertOrThrow("sketch_history",null,ContentValues().apply { put("page_id",pageId);put("payload",delta.toString()) })
         writableDatabase.execSQL("DELETE FROM sketch_history WHERE page_id=? AND id NOT IN (SELECT id FROM sketch_history WHERE page_id=? ORDER BY id DESC LIMIT 100)",arrayOf(pageId,pageId));touch(book)
     }
+    /**
+     * Applies only what the change touched. The editor's copy of a page can be older than the
+     * database (another window may have imported a reference meanwhile), so untouched
+     * references, strokes and paper settings are left exactly as they are stored.
+     */
     private fun applyDelta(book:Long,pageId:Long,slot:Int,d:JSONObject,forward:Boolean) {
         d.getJSONArray(if(forward) "removed" else "added").objects().forEach { writableDatabase.delete("sketch_strokes","id=? AND book=? AND page=?",arrayOf("${it.getLong("id")}","$book","$slot")) }
         d.getJSONArray(if(forward) "added" else "removed").objects().forEach { writeStroke(book,slot,SketchCodec.stroke(it,book,pageId)) }
-        val p=SketchCodec.page(d.getJSONObject(if(forward) "after" else "before"),book,pageId);writePaper(book,slot,p.paper,p.spacing)
-        writableDatabase.delete("sketch_refs","book=? AND page=?",arrayOf("$book","$slot"));p.references.forEach { writeReference(book,slot,it) }
+        val from=SketchCodec.page(d.getJSONObject(if(forward) "before" else "after"),book,pageId)
+        val to=SketchCodec.page(d.getJSONObject(if(forward) "after" else "before"),book,pageId)
+        if(from.paper!=to.paper || from.spacing!=to.spacing) writePaper(book,slot,to.paper,to.spacing)
+        val target=to.references.associateBy { it.id };val source=from.references.associateBy { it.id }
+        from.references.forEach { r -> if(r.id !in target) writableDatabase.delete("sketch_refs","id=? AND book=? AND page=?",arrayOf("${r.id}","$book","$slot")) }
+        to.references.forEach { r -> if(source[r.id]!=r) writeReference(book,slot,r) }
     }
     fun history(pageId:Long):Pair<Boolean,Boolean> = readableDatabase.rawQuery("SELECT applied FROM sketch_history WHERE page_id=? GROUP BY applied",arrayOf("$pageId")).use { c ->
         var undo=false;var redo=false;while(c.moveToNext()) if(c.getInt(0)==1) undo=true else redo=true;undo to redo
     }
     fun undo(book:Long,pageId:Long,redo:Boolean=false):SketchPage = transaction {
         val slot=infoById(book,pageId).slot
-        readableDatabase.rawQuery("SELECT id,payload FROM sketch_history WHERE page_id=? AND applied=? ORDER BY id ${if(redo) "ASC" else "DESC"} LIMIT 1",arrayOf("$pageId",if(redo) "0" else "1")).use { c ->
-            if(c.moveToFirst()) { applyDelta(book,pageId,slot,JSONObject(c.getString(1)),redo);writableDatabase.execSQL("UPDATE sketch_history SET applied=? WHERE id=?",arrayOf(if(redo)1 else 0,c.getLong(0))) }
+        val entry=readableDatabase.rawQuery("SELECT id,length(payload) FROM sketch_history WHERE page_id=? AND applied=? ORDER BY id ${if(redo) "ASC" else "DESC"} LIMIT 1",arrayOf("$pageId",if(redo) "0" else "1")).use { c ->
+            if(c.moveToFirst()) c.getLong(0) to c.getInt(1) else null
+        }
+        if(entry!=null) {
+            applyDelta(book,pageId,slot,JSONObject(payload(entry.first,entry.second)),redo)
+            writableDatabase.execSQL("UPDATE sketch_history SET applied=? WHERE id=?",arrayOf(if(redo)1 else 0,entry.first))
         };touch(book);pageById(book,pageId)
+    }
+    /** Reads a journal entry in pieces: one large edit can be bigger than a cursor window (2 MB). */
+    private fun payload(id:Long,length:Int):String {
+        val chunk=500_000;val out=StringBuilder(length)
+        var start=1
+        while(start<=length) {
+            readableDatabase.rawQuery("SELECT substr(payload,?,?) FROM sketch_history WHERE id=?",arrayOf("$start","$chunk","$id")).use { c -> if(c.moveToFirst()) out.append(c.getString(0)) }
+            start+=chunk
+        }
+        return out.toString()
     }
     fun insertStroke(id:Long,page:Int,stroke:InkStroke):Long { val p=info(id,page);val s=stroke.copy(id=SketchIds.next());writeStroke(id,p.slot,s);touch(id);return s.id }
     fun deleteStroke(strokeId:Long) { writableDatabase.delete("sketch_strokes","id=?",arrayOf("$strokeId")) }
@@ -222,10 +266,19 @@ class SketchStore(private val context: Context) : SQLiteOpenHelper(context, "ske
             }
             writableDatabase.delete("sketch_order","deleted>0 AND deleted<?",arrayOf("$cutoff"))
         }
-        referencesDir.listFiles()?.filter { it.isFile && it.lastModified()<now-24L*60*60*1000 }?.forEach { file->
-            val quoted="%\"${file.name}\"%"
-            val used=readableDatabase.rawQuery("SELECT 1 FROM sketch_refs WHERE path=? OR details LIKE ? UNION ALL SELECT 1 FROM sketch_history WHERE payload LIKE ? LIMIT 1",arrayOf(file.name,quoted,quoted)).use { it.moveToFirst() }
-            if(!used)file.delete()
+        // Files younger than a day may belong to an import that hasn't committed yet.
+        val old=referencesDir.listFiles()?.filter { it.isFile && it.lastModified()<now-24L*60*60*1000 }.orEmpty()
+        if(old.isEmpty())return
+        val live=HashSet<String>()
+        readableDatabase.rawQuery("SELECT path,details FROM sketch_refs",null).use { c -> while(c.moveToNext()) {
+            live+=c.getString(0)
+            runCatching { val d=JSONObject(c.getString(1));live+=d.optString("source");live+=d.optString("original") }
+        } }
+        old.filter { it.name !in live }.forEach { file ->
+            // Still needed if undo or redo can bring the reference back. instr() scans inside SQLite,
+            // so large journal entries are never copied out.
+            val inJournal=readableDatabase.rawQuery("SELECT 1 FROM sketch_history WHERE instr(payload,?)>0 LIMIT 1",arrayOf("\"${file.name}\"")).use { it.moveToFirst() }
+            if(!inJournal)file.delete()
         }
     }
     private fun normalize(book:Long) { pages(book).forEachIndexed { i,p -> writableDatabase.execSQL("UPDATE sketch_order SET position=? WHERE id=?",arrayOf(i,p.id)) };updateCount(book) }

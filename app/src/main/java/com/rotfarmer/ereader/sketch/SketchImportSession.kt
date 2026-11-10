@@ -54,21 +54,30 @@ class SketchImportSession private constructor(private val store:SketchStore,val 
     override fun close(){cancelled=true;directory.deleteRecursively()}
     companion object {
         private fun directory(ctx:Context)=File(ctx.cacheDir,"sketch-import-"+UUID.randomUUID()).apply { check(mkdirs()) }
-        fun prepare(ctx:Context,store:SketchStore,uri:Uri,mime:String?,cancel:()->Boolean={false}):SketchImportSession {
+        fun prepare(ctx:Context,store:SketchStore,uri:Uri,mime:String?,cancel:()->Boolean={false},progress:(String)->Unit={}):SketchImportSession {
             val dir=directory(ctx)
             try {
                 val name=ctx.contentResolver.query(uri,arrayOf(OpenableColumns.DISPLAY_NAME),null,null,null)?.use { if(it.moveToFirst())it.getString(0) else null } ?: uri.lastPathSegment ?: "Reference"
                 val source=File(dir,"source.bin");ctx.contentResolver.openInputStream(uri)?.use { input->source.outputStream().use { out->val buffer=ByteArray(65536);var total=0L
                     while(true){if(cancel())throw CancellationException("Import canceled");val n=input.read(buffer);if(n<0)break;total+=n;require(total<=512L*1024*1024){"Choose a file smaller than 512 MB"};out.write(buffer,0,n)} }
                 } ?: error("Could not read the selected file")
-                val header=ByteArray(8);source.inputStream().use { it.read(header) }
-                val isPdf=header.size>=4 && String(header,0,4)=="%PDF"
-                val isDocx=header.size>=2 && header[0]=='P'.code.toByte() && header[1]=='K'.code.toByte() && ZipFile(source).use { it.getEntry("word/document.xml")!=null }
+                val header=ByteArray(80);val read=source.inputStream().use { it.read(header).coerceAtLeast(0) }
+                val isPdf=read>=4 && String(header,0,4,Charsets.ISO_8859_1)=="%PDF"
+                val zip=read>=2 && header[0]=='P'.code.toByte() && header[1]=='K'.code.toByte()
+                val isDocx=zip && ZipFile(source).use { it.getEntry("word/document.xml")!=null }
+                val isEpub=zip && !isDocx && ZipFile(source).use { z -> z.getEntry("META-INF/container.xml")!=null ||
+                    z.getEntry("mimetype")?.let { e -> z.getInputStream(e).use { String(it.readBytes()).trim() } }=="application/epub+zip" }
+                val isMobi=read>=68 && String(header,60,8,Charsets.ISO_8859_1).let { it=="BOOKMOBI" || it=="TEXtREAd" }
                 val bounds=BitmapFactory.Options().apply { inJustDecodeBounds=true;BitmapFactory.decodeFile(source.path,this) }
                 val image=bounds.outWidth>0
-                val ext=when { isPdf->"pdf";isDocx->"docx";image->when(bounds.outMimeType){"image/jpeg"->"jpg";"image/webp"->"webp";else->"png"};mime=="text/plain" || name.endsWith(".txt",true)->"txt";else->error("Choose JPG, PNG, WebP, PDF, DOCX or TXT") }
+                val ext=when { isPdf->"pdf";isDocx->"docx";isEpub->"epub";isMobi->"mobi";image->when(bounds.outMimeType){"image/jpeg"->"jpg";"image/webp"->"webp";else->"png"};mime=="text/plain" || name.endsWith(".txt",true)->"txt"
+                    else->error("Choose a picture (JPG, PNG, WebP) or a PDF, EPUB, MOBI, Word (.docx) or text file") }
                 val original=File(dir,"original.$ext");check(source.renameTo(original))
-                val display=when(ext){"docx"->File(dir,"document.pdf").also { convert(DocxParser.parse(original,name),it,cancel) };"txt"->File(dir,"document.pdf").also { convert(TextParser.parseText(original,name),it,cancel) };else->original}
+                val title=name.substringBeforeLast('.').ifBlank { name }
+                // Books and documents are laid out as pages, then used like a PDF.
+                val flow:FlowDocument?=when(ext){"docx"->DocxParser.parse(original,title);"txt"->TextParser.parseText(original,title)
+                    "epub"->EpubParser.parse(original,title);"mobi"->MobiParser.parse(original,title);else->null}
+                val display=if(flow!=null)File(dir,"document.pdf").also { convert(flow,it,cancel,progress) } else original
                 val count=pageCount(display);require(count in 1..10000){"Choose a document with at most 10,000 pages"}
                 return SketchImportSession(store,dir,name,original,display,count)
             }catch(e:Throwable){dir.deleteRecursively();throw e}
@@ -77,13 +86,16 @@ class SketchImportSession private constructor(private val store:SketchStore,val 
             val dir=directory(ctx)
             try {
                 val original:File;val display:File
-                if(path!=null){val source=File(path).canonicalFile;require(source.toPath().startsWith(ctx.filesDir.canonicalFile.toPath())){"Invalid excerpt source"};original=File(dir,"excerpt.png");source.copyTo(original);display=original}
-                else {original=File(dir,"excerpt.txt").apply { writeText(text.orEmpty()) };display=File(dir,"excerpt.pdf");convert(TextParser.parseString(text.orEmpty(),label),display){false}}
+                if(path!=null){val source=File(path).canonicalFile
+                    require(source.toPath().startsWith(ctx.filesDir.canonicalFile.toPath()) || SketchLinks.isTemp(ctx,source)){"Invalid excerpt source"}
+                    original=File(dir,"excerpt.png");source.copyTo(original);display=original
+                    if(SketchLinks.isTemp(ctx,source))source.delete()}
+                else {original=File(dir,"excerpt.txt").apply { writeText(text.orEmpty()) };display=File(dir,"excerpt.pdf");convert(TextParser.parseString(text.orEmpty(),label),display,{false})}
                 return SketchImportSession(store,dir,label.ifBlank { "Reading excerpt" },original,display,pageCount(display),book,location)
             }catch(e:Throwable){dir.deleteRecursively();throw e}
         }
         private fun pageCount(file:File)=if(file.extension=="pdf")ParcelFileDescriptor.open(file,ParcelFileDescriptor.MODE_READ_ONLY).use { PdfRenderer(it).use { it.pageCount } } else 1
-        private fun convert(doc:FlowDocument,dest:File,cancel:()->Boolean) {
+        private fun convert(doc:FlowDocument,dest:File,cancel:()->Boolean,progress:(String)->Unit={}) {
             doc.use {
                 val images=ImageCache(doc.res)
                 try {
@@ -94,6 +106,7 @@ class SketchImportSession private constructor(private val store:SketchStore,val 
                     try {var number=0
                         for(ch in 0 until engine.chapterCount)for(i in 0 until engine.pageCount(ch)) {
                             if(cancel())throw CancellationException("Import canceled");require(++number<=10000){"Document has too many pages"}
+                            if(number%10==1)progress("Laying out page $number…")
                             val layout=engine.page(ch,i)
                             layout.items.filterIsInstance<ImageItem>().forEach { image->images.getBlocking(image.path,image.rect.width().toInt().coerceAtLeast(1),image.rect.height().toInt().coerceAtLeast(1),false) }
                             val page=pdf.startPage(PdfDocument.PageInfo.Builder(1200,1697,number).create());page.canvas.drawColor(Color.WHITE);renderer.draw(page.canvas,layout);pdf.finishPage(page)

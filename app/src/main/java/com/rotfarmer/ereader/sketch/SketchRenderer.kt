@@ -16,13 +16,17 @@ object SketchRenderer {
         require(f.toPath().startsWith(dir.canonicalFile.toPath()) && f!=dir.canonicalFile) { "Invalid reference path" }
         return f
     }
+    /** Longest side any decoded reference may have. */
+    private const val MAX_SIDE=3072
+
+    /** Decodes a reference about [pixels] wide (never wider than the original). */
     fun decode(dir:File,ref:ReferenceLayer,pixels:Int):Bitmap? {
-        val target=pixels.coerceIn(64,3072)
+        val target=pixels.coerceIn(64,MAX_SIDE)
         if(ref.source.endsWith(".pdf",true)) {
             ParcelFileDescriptor.open(asset(dir,ref.source),ParcelFileDescriptor.MODE_READ_ONLY).use { descriptor ->
                 PdfRenderer(descriptor).use { pdf ->
                     pdf.openPage(ref.sourcePage.coerceIn(0,pdf.pageCount-1)).use { page ->
-                        val scale=minOf(target.toFloat()/page.width,3072f/page.height)
+                        val scale=minOf(target.toFloat()/page.width,MAX_SIDE.toFloat()/page.height)
                         val b=Bitmap.createBitmap((page.width*scale).toInt().coerceAtLeast(1),(page.height*scale).toInt().coerceAtLeast(1),Bitmap.Config.ARGB_8888)
                         b.eraseColor(Color.WHITE);page.render(b,null,Matrix().apply { setScale(scale,scale) },PdfRenderer.Page.RENDER_MODE_FOR_DISPLAY);return b
                     }
@@ -31,10 +35,17 @@ object SketchRenderer {
         }
         val f=asset(dir,ref.path)
         val bounds=BitmapFactory.Options().apply { inJustDecodeBounds=true };BitmapFactory.decodeFile(f.path,bounds)
-        if(bounds.outWidth<=0)return null
+        if(bounds.outWidth<=0 || bounds.outHeight<=0)return null
+        val scale=minOf(target.toFloat()/bounds.outWidth,MAX_SIDE.toFloat()/bounds.outHeight,1f)
+        val wanted=(bounds.outWidth*scale).toInt().coerceAtLeast(1)
+        // Subsample by powers of two, then let the decoder scale the rest of the way, so a large
+        // photo never exists in memory at full size (a 12 MP photo would need 48 MB).
         var sample=1
-        while(bounds.outWidth/sample>target*1.5f || bounds.outHeight/sample>3072)sample*=2
-        return BitmapFactory.decodeFile(f.path,BitmapFactory.Options().apply { inSampleSize=sample })
+        while(bounds.outWidth/(sample*2)>=wanted)sample*=2
+        val options=BitmapFactory.Options().apply { inSampleSize=sample }
+        val sampled=bounds.outWidth/sample
+        if(sampled>wanted*1.1f)options.apply { inScaled=true;inDensity=sampled;inTargetDensity=wanted }
+        return BitmapFactory.decodeFile(f.path,options)
     }
     fun reference(c:Canvas,r:ReferenceLayer,b:Bitmap,dark:Boolean) {
         if(!r.visible || r.docked)return

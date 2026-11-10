@@ -66,6 +66,19 @@ Tap the **×** in a writing space's corner to delete it (an Undo button appears 
 - **Notebook** (open-book icon in the menu): all bookmarks, highlights and excerpts in the book. Tap any of them to jump to it; the passage is outlined so you can find it on the page.
 - **Excerpts** tab in the library: excerpts from every book, newest first. Tap one to open the book at that exact spot.
 
+## Sketchbooks
+
+Tap **+** in the library and choose **New sketchbook**. A sketchbook starts with 350 blank pages (up to 10,000) and sits in the library next to your books.
+
+- **Draw** with the same S Pen pens as the reader, plus a brush and a soft brush. Lasso, straight lines, arrows, rectangles and ellipses are under **Draw** at the bottom.
+- **Pages:** swipe with a finger to turn pages, or tap the page number to browse thumbnails, search, bookmark and rearrange pages. Pinch to zoom; twist two fingers to rotate (it snaps back to straight).
+- **Paper:** blank, lined, grid or dotted, with adjustable spacing.
+- **References:** import a picture, PDF, EPUB, MOBI, Word or text file and trace over it. You can move, scale, rotate, crop, dim or pin a reference beside the page.
+- **From a book:** select text (or a PDF region, or an excerpt) and choose **Sketchbook** to copy it into a sketchbook, with a link back to the book.
+- **Export** pages as PDF or PNG, or save an editable backup (.zip) that can be restored on any device.
+
+Undo and redo work per page and survive closing the app. Deleted pages and sketchbooks stay in Trash for 30 days.
+
 ## Appearance
 
 - Light and dark mode, brightness, and a warm-light slider.

@@ -10,6 +10,7 @@ import android.view.Gravity
 import android.view.View
 import android.widget.GridLayout
 import android.widget.LinearLayout
+import android.widget.ScrollView
 import com.rotfarmer.ereader.data.Settings
 import com.rotfarmer.ereader.ink.InkColors
 import com.rotfarmer.ereader.ink.InkPainter
@@ -219,6 +220,17 @@ class PenToolbar(ctx: Context, private val c: UiColors, private val settings: Se
             build(); return
         }
         colorDot?.let { it.color = currentColor(); it.invalidate() }
+    }
+
+    /**
+     * The toolbar inside a vertical scroller, so that on a short screen (landscape, or with
+     * the brush pens shown) the bottom buttons scroll into view instead of being cut off.
+     */
+    fun scrollable(): ScrollView = ScrollView(context).apply {
+        isVerticalScrollBarEnabled = false
+        overScrollMode = View.OVER_SCROLL_NEVER
+        isFillViewport = false
+        addView(this@PenToolbar, android.widget.FrameLayout.LayoutParams(android.widget.FrameLayout.LayoutParams.WRAP_CONTENT, android.widget.FrameLayout.LayoutParams.WRAP_CONTENT))
     }
 
     fun setUndoState(canUndo: Boolean, canRedo: Boolean) {

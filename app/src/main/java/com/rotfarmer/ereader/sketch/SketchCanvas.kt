@@ -24,6 +24,8 @@ class SketchCanvas(context:Context,private val settings:Settings,private val ass
         set(value){field=value;selected.clear();invalidate()}
     var partialEraser=false
     var referenceId:Long?=null
+    /** Called with +1 / -1 when a finger swipes across the page at normal zoom. */
+    var onSwipe:((Int)->Unit)?=null
     var zoom=1f;private set
     var pageRotation=0f;private set
     private var panX=0f;private var panY=0f
@@ -32,8 +34,17 @@ class SketchCanvas(context:Context,private val settings:Settings,private val ass
     private val painter=InkPainter()
     private val strokePaint=Paint(Paint.ANTI_ALIAS_FLAG).apply { style=Paint.Style.STROKE }
     private val main=Handler(Looper.getMainLooper());private val executor=Executors.newSingleThreadExecutor()
-    private val bitmaps=object:LruCache<String,Bitmap>(32*1024*1024){override fun sizeOf(key:String,value:Bitmap)=value.allocationByteCount}
+    /** Reference pictures at the resolution the current zoom needs, sized from the app's memory. */
+    private val cacheBytes=(Runtime.getRuntime().maxMemory()/8).coerceIn(24L shl 20,96L shl 20).toInt()
+    private val bitmaps=object:LruCache<String,Bitmap>(cacheBytes){override fun sizeOf(key:String,value:Bitmap)=value.allocationByteCount}
     private val pending=mutableSetOf<String>();private var disposed=false;private var generation=0
+    /** Decode attempts per key, so a picture that can't stay cached is not decoded in a loop. */
+    private val attempts=HashMap<String,Int>()
+    private var swipeX=0f;private var swipeY=0f;private var swiping=false
+    private var rotating=false;private var rotationSlack=0f
+    private var lastStylusTime=0L
+    /** A hand resting on the screen while the S Pen hovers or has just lifted is a palm, not a swipe. */
+    private fun palmLikely()=android.os.SystemClock.uptimeMillis()-lastStylusTime<450 || hover!=null
     private var penId=-1;private var fingerId=-1;private var fingers=false
     private var penIsFinger=false
     private var initialStrokeIds=emptySet<Long>()
@@ -49,7 +60,7 @@ class SketchCanvas(context:Context,private val settings:Settings,private val ass
     private var hover:PointF?=null
     fun setPage(value:SketchPage,info:PageInfo?=null) {
         page=value;working=null;gesturePage=null;live.clear();lasso.clear();index=SketchStrokeIndex(page.strokes)
-        if(info!=null) { pageId=info.id;bookId=info.book;zoom=info.zoom;pageRotation=info.rotation;panX=info.panX;panY=info.panY;selected.clear();referenceId=null;generation++ }
+        if(info!=null) { pageId=info.id;bookId=info.book;zoom=info.zoom;pageRotation=info.rotation;panX=info.panX;panY=info.panY;selected.clear();referenceId=null;generation++;attempts.clear() }
         invalidate()
     }
     fun fit(){zoom=1f;pageRotation=0f;panX=0f;panY=0f;viewport(zoom,panX,panY,pageRotation);invalidate()}
@@ -84,22 +95,30 @@ class SketchCanvas(context:Context,private val settings:Settings,private val ass
     }
     private fun drawHandles(c:Canvas,r:RectF){c.drawRect(r,strokePaint);val radius=7f*resources.displayMetrics.density/(unit*zoom);c.drawCircle(r.right,r.bottom,radius,strokePaint);c.drawCircle(r.centerX(),r.top-radius*3,radius,strokePaint)}
     private fun bitmap(ref:ReferenceLayer):Bitmap? {
-        val pixels=(unit*zoom*ref.width).toInt().coerceIn(128,3072);val bucket=((pixels+255)/256)*256
+        // Every visible reference must fit in the cache at once, or they would keep evicting
+        // each other and be decoded forever. The page-space aspect matches the picture's.
+        val visible=(working ?: page).references.count { it.visible && !it.docked }.coerceAtLeast(1)
+        val aspect=(ref.height/ref.width).takeIf { it.isFinite() }?.coerceIn(.05f,20f) ?: 1.4f
+        val affordable=sqrt(cacheBytes/(visible+1)/4f/aspect).toInt()
+        val pixels=(unit*zoom*ref.width).toInt().coerceIn(128,3072)
+        val bucket=(((pixels+255)/256)*256).coerceAtMost(maxOf(256,affordable/256*256))
         val key="${ref.source}|${ref.path}|${ref.sourcePage}|$bucket"
         bitmaps.get(key)?.let { return it }
-        if(pending.add(key) && !disposed) { val request=generation;executor.execute {
+        val tries=attempts[key] ?: 0
+        if(tries<2 && pending.add(key) && !disposed) { attempts[key]=tries+1;if(attempts.size>500)attempts.clear();val request=generation;executor.execute {
             val result=runCatching { SketchRenderer.decode(assets,ref,bucket) }.getOrNull()
             main.post { pending.remove(key);if(disposed || request!=generation)result?.recycle() else if(result!=null){bitmaps.put(key,result);invalidate()} }
         } }
         // Keep the previous resolution visible while a sharper decode is pending.
         return bitmaps.snapshot().entries.firstOrNull { it.key.startsWith("${ref.source}|${ref.path}|${ref.sourcePage}|") }?.value
     }
-    override fun onHoverEvent(e:MotionEvent):Boolean { updateMatrix();hover=if(e.actionMasked==MotionEvent.ACTION_HOVER_EXIT)null else point(e.x,e.y);invalidate();return true }
+    override fun onHoverEvent(e:MotionEvent):Boolean { lastStylusTime=android.os.SystemClock.uptimeMillis();updateMatrix();hover=if(e.actionMasked==MotionEvent.ACTION_HOVER_EXIT)null else point(e.x,e.y);invalidate();return true }
     override fun onTouchEvent(e:MotionEvent):Boolean {
         if(!enabledForInput)return true
         updateMatrix();val ai=e.actionIndex;val action=e.actionMasked
         val stylus=e.getToolType(ai)==MotionEvent.TOOL_TYPE_STYLUS || e.getToolType(ai)==MotionEvent.TOOL_TYPE_ERASER
         val canceled=android.os.Build.VERSION.SDK_INT>=33 && e.flags and MotionEvent.FLAG_CANCELED!=0
+        if(stylus)lastStylusTime=android.os.SystemClock.uptimeMillis()
         if(action==MotionEvent.ACTION_CANCEL || ((action==MotionEvent.ACTION_POINTER_UP || action==MotionEvent.ACTION_UP) && canceled && e.getPointerId(ai)==penId)) {
             cancelGesture();return true
         }
@@ -120,7 +139,7 @@ class SketchCanvas(context:Context,private val settings:Settings,private val ass
         }
         if(settings.fingerDraw && mode!="Lasso" && referenceId==null && e.pointerCount==1 && action==MotionEvent.ACTION_DOWN) { beginPen(e,ai);return true }
         if(action==MotionEvent.ACTION_DOWN) {
-            fingers=true;fingerId=e.getPointerId(0);start=point(e.x,e.y);last=PointF(e.x,e.y)
+            fingers=true;fingerId=e.getPointerId(0);start=point(e.x,e.y);last=PointF(e.x,e.y);rotating=false
             startZoom=zoom;startRotation=pageRotation;startPanX=panX;startPanY=panY;pinchDistance=0f;gesturePage=page;working=null
             referenceStart=page.references.firstOrNull { it.id==referenceId && !it.locked }
             selectionStart=bounds(page.strokes.filter { it.id in selected })
@@ -129,7 +148,10 @@ class SketchCanvas(context:Context,private val settings:Settings,private val ass
             transformKind=when { box.isEmpty -> "";hypot(start.x-box.right,start.y-box.bottom)<threshold -> "scale"
                 hypot(start.x-box.centerX(),start.y-box.top+threshold*.875f)<threshold -> "rotate";box.contains(start.x,start.y)->"move";else->"" }
             if(referenceStart!=null && transformKind=="")referenceStart=null
+            // At normal zoom the whole page is visible: a one-finger swipe turns the page instead of panning.
+            swiping=transformKind=="" && zoom<=1.01f && onSwipe!=null && !palmLikely();swipeX=e.x;swipeY=e.y
         } else if(fingers && action==MotionEvent.ACTION_POINTER_DOWN && e.pointerCount==2) {
+            swiping=false;rotating=false
             pinchDistance=hypot(e.getX(1)-e.getX(0),e.getY(1)-e.getY(0)).coerceAtLeast(1f)
             pinchAngle=atan2(e.getY(1)-e.getY(0),e.getX(1)-e.getX(0))*180f/PI.toFloat()
             pinchCenter=PointF((e.getX(0)+e.getX(1))/2,(e.getY(0)+e.getY(1))/2);pinchAnchor=point(pinchCenter.x,pinchCenter.y)
@@ -137,19 +159,31 @@ class SketchCanvas(context:Context,private val settings:Settings,private val ass
         } else if(fingers && action==MotionEvent.ACTION_MOVE) {
             if(e.pointerCount>=2 && pinchDistance>0) {
                 val ratio=hypot(e.getX(1)-e.getX(0),e.getY(1)-e.getY(0))/pinchDistance
-                val angle=atan2(e.getY(1)-e.getY(0),e.getX(1)-e.getX(0))*180f/PI.toFloat()-pinchAngle
+                val angle=normalizeAngle(atan2(e.getY(1)-e.getY(0),e.getX(1)-e.getX(0))*180f/PI.toFloat()-pinchAngle)
                 val cx=(e.getX(0)+e.getX(1))/2;val cy=(e.getY(0)+e.getY(1))/2
                 if(referenceStart!=null) { val r=referenceStart!!;val scale=ratio.coerceIn(.05f,20f);previewReference(r.copy(width=r.width*scale,height=r.height*scale,rotation=r.rotation+angle)) }
-                else { zoom=(startZoom*ratio).coerceIn(1f,8f);pageRotation=startRotation+angle;updateMatrix();val p=floatArrayOf(pinchAnchor.x,pinchAnchor.y);matrix.mapPoints(p);panX+=(cx-p[0])/unit;panY+=(cy-p[1])/unit }
+                else {
+                    // Zooming shouldn't tilt the page: rotation starts only after a clear twist.
+                    if(!rotating && abs(angle)>ROTATE_THRESHOLD){rotating=true;rotationSlack=if(angle>0)ROTATE_THRESHOLD else -ROTATE_THRESHOLD}
+                    zoom=(startZoom*ratio).coerceIn(1f,8f);pageRotation=if(rotating)startRotation+angle-rotationSlack else startRotation
+                    updateMatrix();val p=floatArrayOf(pinchAnchor.x,pinchAnchor.y);matrix.mapPoints(p);panX+=(cx-p[0])/unit;panY+=(cy-p[1])/unit
+                }
             } else if(pinchDistance==0f) {
                 val pi=e.findPointerIndex(fingerId);if(pi<0)return true
                 val now=point(e.getX(pi),e.getY(pi))
                 if(transformKind.isNotBlank())transform(now)
-                else { panX+=(e.getX(pi)-last.x)/unit;panY+=(e.getY(pi)-last.y)/unit }
+                else if(!swiping) { panX+=(e.getX(pi)-last.x)/unit;panY+=(e.getY(pi)-last.y)/unit }
                 last=PointF(e.getX(pi),e.getY(pi))
             };invalidate()
         } else if(fingers && (action==MotionEvent.ACTION_UP || (action==MotionEvent.ACTION_POINTER_UP && canceled))) {
-            if(canceled)cancelGesture() else { working?.let { change(it) };viewport(zoom,panX,panY,pageRotation);fingers=false;gesturePage=null;working=null }
+            if(canceled)cancelGesture() else {
+                working?.let { change(it) }
+                if(rotating) { val straight=Math.round(pageRotation/90f)*90f;if(abs(pageRotation-straight)<SNAP_DEGREES)pageRotation=straight }
+                viewport(zoom,panX,panY,pageRotation);fingers=false;gesturePage=null;working=null
+                val dx=e.x-swipeX;val dy=e.y-swipeY
+                if(swiping && action==MotionEvent.ACTION_UP && abs(dx)>maxOf(width*.12f,64f*resources.displayMetrics.density) && abs(dx)>abs(dy)*1.5f)onSwipe?.invoke(if(dx<0)1 else -1)
+                swiping=false;rotating=false
+            }
             invalidate()
         }
         return true
@@ -187,6 +221,7 @@ class SketchCanvas(context:Context,private val settings:Settings,private val ass
         else if(live.isNotEmpty()) { val stroke=InkStroke(SketchIds.next(),bookId,Anchor(Anchor.PDF,pageId,0),gestureTool,settings.toolColor(gestureTool),widthUnits,live.toFloatArray(),System.currentTimeMillis());change(page.copy(strokes=page.strokes+stroke)) }
         live.clear();lasso.clear();gesturePage=null;working=null
     }
+    private companion object { const val ROTATE_THRESHOLD=15f;const val SNAP_DEGREES=8f }
     private fun previewReference(ref:ReferenceLayer){working=page.copy(references=page.references.map { if(it.id==ref.id)ref else it })}
     private fun transform(now:PointF) {
         val ref=referenceStart;val rect=ref?.let { RectF(it.x,it.y,it.x+it.width,it.y+it.height) } ?: selectionStart
@@ -197,6 +232,7 @@ class SketchCanvas(context:Context,private val settings:Settings,private val ass
         else { val m=Matrix();m.setScale(scale,scale,rect.left,rect.top);m.postRotate(angle,rect.centerX(),rect.centerY());m.postTranslate(dx,dy)
             working=page.copy(strokes=page.strokes.map { if(it.id in selected)SketchGeometry.transform(it,m,scale) else it }) }
     }
-    private fun cancelGesture() { working=null;gesturePage=null;live.clear();lasso.clear();penId=-1
+    private fun normalizeAngle(a:Float):Float { var d=a%360f;if(d>180f)d-=360f;if(d< -180f)d+=360f;return d }
+    private fun cancelGesture() { working=null;gesturePage=null;live.clear();lasso.clear();penId=-1;swiping=false;rotating=false
         if(fingers){zoom=startZoom;pageRotation=startRotation;panX=startPanX;panY=startPanY};fingers=false;invalidate() }
 }

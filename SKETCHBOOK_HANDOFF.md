@@ -1,6 +1,6 @@
 # Sketchbook handoff
 
-Continue on `feature/sketchbooks-350-pages` using draft PR #2.
+The sketchbook work now lives on the main branch (`ccr-c9250789-tpqdf1`).
 
 The Library grid combines regular books and sketchbooks. The editor has dark
 paper, explicit page navigation, a thumbnail browser, pressure input, pan and
@@ -33,3 +33,26 @@ Remaining validation and polish:
 - Review the editor and reference panel in portrait, landscape, and both
   themes. Import selection can be canceled during the commit stage. Add
   progress and cancellation to the initial document preparation stage.
+
+## Changes after review (merged into the main branch)
+
+- `SketchStore.savePage` and undo apply only what a change touched (strokes,
+  references by id, paper only if it changed). An editor holding an older copy
+  of the page can no longer delete a reference imported by another window.
+- `SketchActivity` reloads the page in `onRestart`, keeps one canvas for its
+  lifetime (rotation keeps the tool, selection and arranged reference), queues
+  storage work instead of dropping it, and saves its state for recreation.
+- One shared `SketchStore.of(context)` per process; `SketchWriter` retries
+  failed saves with backoff and no longer blocks Back.
+- The library survives sketchbook database errors; the 30-day purge runs in the
+  background once a day and only searches the journal for orphaned files.
+- Reference decodes are sized to fit the canvas cache (no decode loop when
+  zoomed); library and page-browser previews update one card at a time.
+- Backups are buffered; PDF export draws references at about 150 dpi.
+- Large journal entries are read in pieces (no 2 MB cursor-window limit).
+- EPUB and MOBI import as references, with progress and cancel while preparing.
+- Page-range PDF export, swipe page turning at normal zoom, rotation that needs
+  a deliberate twist and snaps to 90°, a scrollable pen toolbar, a 10,000-page
+  limit, and temporary PDF-region images kept in the cache.
+- `SketchImporter` (unused) was removed.
+

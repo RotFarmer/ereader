@@ -14,7 +14,7 @@ class SketchPageBrowser(private val host:SketchActivity,private val pages:List<P
     fun show() {
         val ui=host.colors;val body=host.column();var query="";var filter=0;var shown=pages
         val jobs=CoroutineScope(SupervisorJob()+Dispatchers.Main)
-        val cache=object:LruCache<Long,Bitmap>(8*1024*1024){override fun sizeOf(key:Long,value:Bitmap)=value.allocationByteCount}
+        val cache=object:LruCache<Long,Bitmap>(16*1024*1024){override fun sizeOf(key:Long,value:Bitmap)=value.allocationByteCount}
         val requests=mutableSetOf<Long>()
         val search=EditText(host).apply { hint="Page number, title or section";setTextColor(ui.fg);setHintTextColor(ui.muted);setSingleLine() }
         body.addView(search)
@@ -31,7 +31,13 @@ class SketchPageBrowser(private val host:SketchActivity,private val pages:List<P
                 (cell.getChildAt(1) as TextView).text="${p.index+1}${if(p.bookmarked)" ★" else ""} ${p.title}"
                 (cell.getChildAt(2) as TextView).text=p.section
                 if(p.used && cache.get(p.id)==null && requests.add(p.id))jobs.launch {
-                    try { val bitmap=withContext(Dispatchers.IO){SketchRenderer.thumbnail(host.store.referencesDir,host.store.pageById(host.bookId,p.id),180,host.settings.dark)};cache.put(p.id,bitmap);notifyDataSetChanged() }
+                    try {
+                        val bitmap=withContext(Dispatchers.IO){SketchRenderer.thumbnail(host.store.referencesDir,host.store.pageById(host.bookId,p.id),180,host.settings.dark)}
+                        cache.put(p.id,bitmap)
+                        for(i in 0 until grid.childCount){val v=grid.getChildAt(i) as? LinearLayout ?: continue;if(v.tag==p.id)(v.getChildAt(0) as ImageView).setImageBitmap(bitmap)}
+                    }
+                    catch(e:CancellationException){throw e}
+                    catch(e:Exception){ /* A page that can't be drawn just has no thumbnail. */ }
                     finally { requests.remove(p.id) }
                 }
                 return cell

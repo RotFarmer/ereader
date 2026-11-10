@@ -14,7 +14,12 @@ object SketchArchive {
         val infos=store.pages(book);val manifest=JSONObject().put("version",1).put("origin",store.archiveOrigin)
             .put("title",b.title).put("currentPage",b.currentPage).put("defaultPaper",b.defaultPaper).put("defaultSpacing",b.defaultSpacing)
         val pages=JSONArray();val assets=linkedMapOf<String,String>()
-        val zip=ZipOutputStream(object:FilterOutputStream(output){override fun close(){flush()}})
+        // Buffered, and never closing the caller's stream. FilterOutputStream on its own writes
+        // one byte at a time, which made backups with pictures take minutes.
+        val zip=ZipOutputStream(BufferedOutputStream(object:FilterOutputStream(output){
+            override fun write(b:ByteArray,off:Int,len:Int){out.write(b,off,len)}
+            override fun close(){flush()}
+        },1 shl 16))
         try {
             infos.forEachIndexed { index,p->
                 val path=if(p.used) "pages/$index.json" else ""
@@ -42,7 +47,7 @@ object SketchArchive {
         val copied=mutableListOf<File>()
         try {
             val files=mutableMapOf<String,File>();var total=0L
-            ZipInputStream(object:FilterInputStream(input){override fun close(){}}).use { zip->
+            ZipInputStream(BufferedInputStream(object:FilterInputStream(input){override fun close(){}},1 shl 16)).use { zip->
                 while(true){val entry=zip.nextEntry ?: break;val name=entry.name
                     require(!entry.isDirectory && name.matches(Regex("manifest\\.json|pages/[0-9]+\\.json|assets/[0-9]+")) && name !in files){"Invalid or duplicate backup entry"}
                     require(files.size<30001){"Backup contains too many files"}
